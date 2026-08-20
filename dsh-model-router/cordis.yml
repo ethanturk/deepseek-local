@@ -1,0 +1,16 @@
+# Patch overlay for local development.
+# After cloning this repo, replace ABSOLUTE_REPO_ROOT with the clone path.
+#
+# Usage from a deepseek-harness checkout:
+#   pnpm dsh web --patch /ABSOLUTE_REPO_ROOT/dsh-model-router/cordis.yml
+
+- insert:
+    - id: dsh-model-router
+      name: "/ABSOLUTE_REPO_ROOT/dsh-model-router/src/index.ts"
+      # Optional inline config override (uncomment and edit):
+      # config:
+      #   classifier:
+      #     mode: both
+      #   validator:
+      #     maxEscalations: 2
+      #     stickyScope: turn

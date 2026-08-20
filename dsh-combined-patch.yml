@@ -1,0 +1,34 @@
+# Combined patch: model-router + local-model-guard
+# After cloning, replace every ABSOLUTE_REPO_ROOT with your clone path.
+#
+# Usage from a deepseek-harness checkout:
+#   pnpm dsh web --patch /ABSOLUTE_REPO_ROOT/dsh-combined-patch.yml
+
+- insert:
+    - id: dsh-model-router
+      name: "/ABSOLUTE_REPO_ROOT/dsh-model-router/src/index.ts"
+      # config:
+      #   tiers:
+      #     - id: fast
+      #       provider: ollama
+      #       model: qwen2.5:7b
+      #       enableLocalGuardrails: true
+      #       reasoningEffort: off
+      #     - id: medium
+      #       provider: deepseek-official
+      #       model: deepseek-v4-flash
+      #       enableLocalGuardrails: false
+      #       reasoningEffort: high
+      #     - id: smart
+      #       provider: deepseek-official
+      #       model: deepseek-v4-pro
+      #       enableLocalGuardrails: false
+      #       reasoningEffort: max
+
+    - id: dsh-local-model-guard
+      name: "/ABSOLUTE_REPO_ROOT/dsh-local-model-guard/src/index.ts"
+      # config:
+      #   maxConsecutiveFailures: 2
+      #   maxRepeatedCalls: 2
+      #   windowSize: 6
+      #   forceAlways: false

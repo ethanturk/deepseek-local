@@ -1,0 +1,27 @@
+{
+  "name": "dsh-local-model-guard",
+  "version": "0.1.0",
+  "description": "Strict monitoring for failed tool calls and loops – for flaky local models in DeepSeek Harness",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "src",
+    "cordis.yml"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "local-model",
+    "guardrails",
+    "tool-monitoring"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.yml"
+    }
+  }
+}
