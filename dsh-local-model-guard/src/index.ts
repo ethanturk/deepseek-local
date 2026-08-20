@@ -23,6 +23,7 @@
  */
 
 import type { Context } from "@deepseek-ai/cordis";
+import { randomUUID } from "node:crypto";
 import {
   type GuardState,
   type LocalGuardConfig,
@@ -34,7 +35,6 @@ export const inject = [
   "tools",
   "modelRouter",
   "systemPrompt",
-  "agents",
   "sessions",
 ];
 
@@ -125,24 +125,18 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     }
   }
 
-  function injectRecovery(agentId: string, reason: string) {
-    try {
-      const agents = (ctx as any).agents;
-      const agent = agents?.get?.(agentId);
-      if (agent?.inject) {
-        agent.inject({
-          role: "user",
-          content: `${config.recoveryMessage}\n(Reason: ${reason})`,
-        });
-      } else {
-        console.warn(
-          `[dsh-local-model-guard] recovery needed (${agentId}): ${reason}`,
-        );
-      }
-      emitGuardEvent(agentId, "intervention", { reason });
-    } catch (err) {
-      console.warn("[dsh-local-model-guard] injectRecovery failed", err);
-    }
+  function createRecoveryMessage(reason: string) {
+    return {
+      id: randomUUID(),
+      role: "user" as const,
+      content: [
+        {
+          type: "text" as const,
+          text: `${config.recoveryMessage}\n(Reason: ${reason})`,
+        },
+      ],
+      source: { kind: "plugin" as const, plugin: name },
+    };
   }
 
   // ---------- Tiny system-prompt section (keeps context small) ----------
@@ -260,6 +254,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
 
   // ---------- Intervene before the model sees the next step ----------
   ctx.on("agent/pre-step" as any, async (claim: any, next: any) => {
+    let recoveryReason: string | undefined;
     try {
       const agentId =
         claim?.agentId ?? claim?.agent?.id ?? claim?.id ?? "default";
@@ -286,7 +281,8 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
         const now = Date.now();
         // 6s cooldown avoids spamming recovery into context on every step
         if (!s.lastInterventionAt || now - s.lastInterventionAt > 6000) {
-          injectRecovery(agentId, reason);
+          recoveryReason = reason;
+          emitGuardEvent(agentId, "intervention", { reason });
           s.lastInterventionAt = now;
           s.consecutiveFailures = 0;
           // Keep a short tail but break the immediate repeat streak
@@ -301,7 +297,12 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     } catch (err) {
       console.warn("[dsh-local-model-guard] pre-step error", err);
     }
-    return next?.();
+    const decision = await next();
+    if (!recoveryReason || decision.kind !== "enter") return decision;
+    return {
+      ...decision,
+      messages: [...decision.messages, createRecoveryMessage(recoveryReason)],
+    };
   });
 
   // ---------- Hard stop option on turn-stopping ----------
