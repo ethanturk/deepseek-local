@@ -40,42 +40,33 @@ pnpm dsh web --patch /absolute/path/to/dsh-model-router/cordis.yml
 
 Then select the virtual model **Auto (Tiered Router)** in the UI (or configure it as default).
 
-## Config overrides
+## Model tier settings
 
-Pass config via the patch row or your profile’s `cordis.patch.yml`:
+The patch only loads the plugin. Put provider/model tier assignments in the
+`model-router` section of the DSH settings file (normally `~/.dsh/settings.yaml`):
 
 ```yaml
-- insert:
-    - id: dsh-model-router
-      name: "/absolute/path/to/dsh-model-router/src/index.ts"
-      config:
-        tiers:
-          - id: fast
-            provider: ollama
-            model: qwen2.5:7b
-            enableLocalGuardrails: true
-            reasoningEffort: off          # optional; omit for provider default
-          - id: medium
-            provider: deepseek-official
-            model: deepseek-v4-flash
-            enableLocalGuardrails: false
-            reasoningEffort: high
-          - id: smart
-            provider: deepseek-official
-            model: deepseek-v4-pro
-            enableLocalGuardrails: false
-            reasoningEffort: max
-        classifier:
-          mode: both
-          provider: ollama
-          model: qwen2.5:7b
-        validator:
-          alwaysUseTierId: smart
-          maxEscalations: 2
-          stickyScope: turn
+model-router:
+  tiers:
+    - id: fast
+      provider: local
+      model: your-fast-local-model-id
+      enableLocalGuardrails: true
+    - id: medium
+      provider: local
+      model: your-medium-local-model-id
+      enableLocalGuardrails: true
+    - id: smart
+      provider: local
+      model: your-smart-local-model-id
+      enableLocalGuardrails: true
+  classifier:
+    mode: both
+    provider: local
+    model: your-fast-local-model-id
 ```
 
-`reasoningEffort` is an adapter-owned opaque id (e.g. `off`, `low`, `medium`, `high`, `max`).  
+Optional `reasoningEffort` values belong on tier entries in DSH settings. It is an adapter-owned opaque id (e.g. `off`, `low`, `medium`, `high`, `max`).
 It is written into ModelSelection and onto `agent/request` options when those seams exist.
 
 **Flaky effort handling:** If a request fails with an unsupported / reasoning-effort-related error (`UNSUPPORTED`, message mentions effort, etc.), the router:

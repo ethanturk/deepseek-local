@@ -7,7 +7,7 @@
 - insert:
     - id: dsh-model-router
       name: "/ABSOLUTE_REPO_ROOT/dsh-model-router/src/index.ts"
-      # Optional inline config override (uncomment and edit):
+      # Optional non-tier behavior overrides (tier assignments live in DSH settings):
       # config:
       #   classifier:
       #     mode: both

@@ -83,34 +83,31 @@ export interface ModelRouterService {
   getState(agentId: string): RouterState | undefined;
 }
 
-/** Default config – override via cordis.yml / plugin config. */
+/** Local-only composition fallback; DSH settings own the live tier assignments. */
 export const DEFAULT_CONFIG: ModelRouterConfig = {
   tiers: [
     {
       id: "fast",
-      provider: "ollama",
+      provider: "local",
       model: "qwen2.5:7b",
       enableLocalGuardrails: true,
-      reasoningEffort: "off", // local models: keep effort off / minimal
     },
     {
       id: "medium",
-      provider: "deepseek-official",
-      model: "deepseek-v4-flash",
-      enableLocalGuardrails: false,
-      reasoningEffort: "high",
+      provider: "local",
+      model: "qwen2.5:7b",
+      enableLocalGuardrails: true,
     },
     {
       id: "smart",
-      provider: "deepseek-official",
-      model: "deepseek-v4-pro",
-      enableLocalGuardrails: false,
-      reasoningEffort: "max",
+      provider: "local",
+      model: "qwen2.5:7b",
+      enableLocalGuardrails: true,
     },
   ],
   classifier: {
     mode: "both",
-    provider: "ollama",
+    provider: "local",
     model: "qwen2.5:7b",
   },
   validator: {

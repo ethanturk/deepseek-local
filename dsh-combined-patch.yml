@@ -7,23 +7,7 @@
 - insert:
     - id: dsh-model-router
       name: "/ABSOLUTE_REPO_ROOT/dsh-model-router/src/index.ts"
-      # config:
-      #   tiers:
-      #     - id: fast
-      #       provider: ollama
-      #       model: qwen2.5:7b
-      #       enableLocalGuardrails: true
-      #       reasoningEffort: off
-      #     - id: medium
-      #       provider: deepseek-official
-      #       model: deepseek-v4-flash
-      #       enableLocalGuardrails: false
-      #       reasoningEffort: high
-      #     - id: smart
-      #       provider: deepseek-official
-      #       model: deepseek-v4-pro
-      #       enableLocalGuardrails: false
-      #       reasoningEffort: max
+      # Tier assignments live in the model-router section of DSH settings.
 
     - id: dsh-local-model-guard
       name: "/ABSOLUTE_REPO_ROOT/dsh-local-model-guard/src/index.ts"

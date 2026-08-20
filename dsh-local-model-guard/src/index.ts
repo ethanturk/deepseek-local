@@ -30,7 +30,13 @@ import {
 } from "./types.ts";
 
 export const name = "dsh-local-model-guard";
-export const inject = ["tools", "modelRouter"];
+export const inject = [
+  "tools",
+  "modelRouter",
+  "systemPrompt",
+  "agents",
+  "sessions",
+];
 
 function resolveConfig(raw?: Partial<LocalGuardConfig>): LocalGuardConfig {
   return { ...DEFAULT_GUARD_CONFIG, ...raw };
@@ -143,9 +149,9 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   if (config.enableSystemPromptHint) {
     try {
       (ctx as any).systemPrompt?.section?.({
-        id: "local-model-guard-hint",
+        name: "local-model-guard-hint",
         order: 45,
-        content:
+        text:
           "Local/small model mode: prefer short precise tool calls. " +
           "On tool failure, do not retry the same call with the same arguments — change the approach.",
       });
@@ -155,7 +161,6 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   }
 
   // ---------- Monitor tool results ----------
-  // Prefer tools/result (authoritative). Fall back to tools/post-execute if needed.
   const onToolOutcome = (payload: any) => {
     try {
       const agentId =
@@ -199,12 +204,10 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     }
   };
 
-  ctx.on("tools/result" as any, onToolOutcome);
-  // Some builds expose post-execute with a transformable result
-  ctx.on("tools/post-execute" as any, async (exec: any, next: any) => {
+  // DSH passes (execution, result, next) through this authoritative waterfall.
+  // Do not also consume tools/result: both fire for one call and double-count it.
+  ctx.on("tools/post-execute" as any, async (exec: any, result: any, next: any) => {
     try {
-      const result = await next?.();
-      // If next returns a result object, also feed the monitor
       if (result && typeof result === "object") {
         onToolOutcome({
           ...exec,
@@ -212,7 +215,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
           agentId: exec?.agentId ?? result?.agentId,
         });
       }
-      return result;
+      return await next();
     } catch (err) {
       // Count thrown execution as failure
       onToolOutcome({

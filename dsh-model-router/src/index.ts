@@ -24,6 +24,11 @@
 
 import fs from "node:fs";
 import type { Context } from "@deepseek-ai/cordis";
+import z from "@deepseek-ai/schemastery";
+import {
+  installSettingsSection,
+  settingsNamespace,
+} from "@deepseek-ai/dsh-settings";
 import {
   type Complexity,
   type ModelRouterConfig,
@@ -35,18 +40,58 @@ import {
 import { classifyHeuristic } from "./heuristic.ts";
 
 export const name = "dsh-model-router";
-export const inject = ["llm", "systemPrompt", "tools", "sessions", "agents"];
+export const inject = ["llm", "systemPrompt", "tools", "sessions", "agents", "settings"];
 
-/** Merge user config over defaults. */
-function resolveConfig(raw?: Partial<ModelRouterConfig>): ModelRouterConfig {
+export const MODEL_ROUTER_SETTINGS_NAMESPACE = settingsNamespace("model-router");
+
+const tierSchema = z.object({
+  id: z.union([z.const("fast"), z.const("medium"), z.const("smart")]).required(),
+  provider: z.string().required(),
+  model: z.string().required(),
+  enableLocalGuardrails: z.boolean().required(),
+  reasoningEffort: z.string(),
+});
+
+export const MODEL_ROUTER_SETTINGS_SCHEMA = z.object({
+  tiers: z.array(tierSchema).required(),
+  classifier: z.object({
+    mode: z.union([z.const("heuristic"), z.const("llm"), z.const("both")]).required(),
+    provider: z.string(),
+    model: z.string(),
+  }).required(),
+  validator: z.object({
+    alwaysUseTierId: z.union([z.const("fast"), z.const("medium"), z.const("smart")]).required(),
+    maxEscalations: z.number().required(),
+    stickyScope: z.union([z.const("turn"), z.const("session")]).required(),
+  }).required(),
+  virtualModel: z.object({
+    id: z.string().required(),
+    displayName: z.string().required(),
+  }).required(),
+  enableSystemPromptHint: z.boolean().required(),
+});
+
+type ModelRouterPluginConfig = Omit<Partial<ModelRouterConfig>, "tiers">;
+
+/** Merge non-tier composition config over local-only defaults. */
+function resolveConfig(raw?: ModelRouterPluginConfig): ModelRouterConfig {
   if (!raw) return DEFAULT_CONFIG;
   return {
     ...DEFAULT_CONFIG,
     ...raw,
-    tiers: raw.tiers ?? DEFAULT_CONFIG.tiers,
+    tiers: DEFAULT_CONFIG.tiers,
     classifier: { ...DEFAULT_CONFIG.classifier, ...raw.classifier },
     validator: { ...DEFAULT_CONFIG.validator, ...raw.validator },
     virtualModel: { ...DEFAULT_CONFIG.virtualModel, ...raw.virtualModel },
+  };
+}
+
+function resolveSettings(raw?: Partial<ModelRouterConfig>): ModelRouterConfig {
+  if (!raw) return resolveConfig();
+  const { tiers, ...composition } = raw;
+  return {
+    ...resolveConfig(composition),
+    tiers: tiers ?? DEFAULT_CONFIG.tiers,
   };
 }
 
@@ -70,11 +115,32 @@ function oneTierBelow(current: TierId): TierId {
   return TIER_ORDER[idx - 1];
 }
 
-export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
-  const config = resolveConfig(rawConfig);
+export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
+  const compositionConfig = resolveConfig(rawConfig);
+  let config = compositionConfig;
+  let settingsSource = () => compositionConfig;
+  installSettingsSection(
+    ctx,
+    MODEL_ROUTER_SETTINGS_NAMESPACE,
+    MODEL_ROUTER_SETTINGS_SCHEMA as z<ModelRouterConfig>,
+    compositionConfig,
+    {
+      setSource(source) {
+        settingsSource = source;
+      },
+      onChange() {
+        config = resolveSettings(settingsSource());
+      },
+      validate(value) {
+        const ids = value.tiers.map((tier) => tier.id);
+        if (ids.join(",") !== "fast,medium,smart") {
+          throw new Error("model-router tiers must be ordered fast, medium, smart");
+        }
+      },
+    },
+  );
   const state = new Map<string, RouterState>();
   const llm = (ctx as any).llm;
-
   // ---------- helpers ----------
 
   function getOrCreateState(agentId: string): RouterState {
@@ -302,9 +368,9 @@ ${assistantResponse.slice(0, 3000)}`;
   if (config.enableSystemPromptHint) {
     try {
       (ctx as any).systemPrompt?.section?.({
-        id: "model-router-hint",
+        name: "model-router-hint",
         order: 40,
-        content:
+        text:
           "You are running under an automatic tiered model router. Focus on the current task. Be precise and concise.",
       });
     } catch {

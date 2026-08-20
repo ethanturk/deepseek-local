@@ -22,16 +22,23 @@ Designed to pair with **`dsh-model-router`**: guards only run when the current t
 2. Else if **`ctx.modelRouter`** exists → enforce only when `isLocalGuardrailsEnabled(agentId)` is true  
 3. Else (no router) → enforce by default  
 
-Typical router config:
+Typical `model-router` section in `~/.dsh/settings.yaml`:
 
 ```yaml
-tiers:
-  - id: fast
-    enableLocalGuardrails: true    # local / small model
-  - id: medium
-    enableLocalGuardrails: false
-  - id: smart
-    enableLocalGuardrails: false
+model-router:
+  tiers:
+    - id: fast
+      provider: local
+      model: your-fast-local-model-id
+      enableLocalGuardrails: true
+    - id: medium
+      provider: local
+      model: your-medium-local-model-id
+      enableLocalGuardrails: true
+    - id: smart
+      provider: local
+      model: your-smart-local-model-id
+      enableLocalGuardrails: true
 ```
 
 ### Intervention

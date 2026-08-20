@@ -83,28 +83,34 @@ You may instead rewrite `$PLUGIN_ROOT/dsh-combined-patch.yml` and the per-plugin
 
 ---
 
-## 3. (Optional) Configure tiers and providers
+## 3. Configure tiers and providers
 
-Default tiers assume:
+Tier assignments belong in the `model-router` section of the DSH settings file,
+normally `~/.dsh/settings.yaml`. The patch YAML only loads the plugin.
 
-| Tier | provider (default) | model (default) | local guardrails | reasoningEffort |
-|------|--------------------|-----------------|------------------|-----------------|
-| fast | ollama | qwen2.5:7b | true | off |
-| medium | deepseek-official | deepseek-v4-flash | false | high |
-| smart | deepseek-official | deepseek-v4-pro | false | max |
+For a local-only setup, reference model IDs already declared under
+`llm-pi-ai.providers.local.models`:
 
-**Before first run**, align `provider` / `model` with providers already configured in the user’s Harness install (`Settings → Models`, or `$DSH_HOME` / profile settings).
-
-To override without editing TypeScript defaults, put a `config:` block under each plugin row in the patch YAML (see comments in `dsh-combined-patch.yml`).
+```yaml
+model-router:
+  tiers:
+    - { id: fast, provider: local, model: your-fast-model-id, enableLocalGuardrails: true }
+    - { id: medium, provider: local, model: your-medium-model-id, enableLocalGuardrails: true }
+    - { id: smart, provider: local, model: your-smart-model-id, enableLocalGuardrails: true }
+  classifier:
+    mode: both
+    provider: local
+    model: your-fast-model-id
+```
 
 Minimum agent checklist:
 
 1. List configured providers in the running Harness (UI or settings files).  
-2. Set `fast` to a local provider if available (e.g. Ollama).  
-3. Set `medium` / `smart` to real cloud or local IDs the user has keys for.  
-4. Leave `enableLocalGuardrails: true` only on tiers that should get strict tool-loop monitoring (typically local/small).
+2. Set all three tiers to configured provider/model pairs.
+3. Set the classifier to a configured provider/model pair.
+4. Enable strict tool-loop monitoring for local/small tiers.
 
-If the user has **no** Ollama / DeepSeek credentials yet, **do not invent keys**. Report that model selection must be configured and stop after loading plugins with clear warnings.
+If the user has no configured local provider, do not invent model IDs or keys.
 
 ---
 
