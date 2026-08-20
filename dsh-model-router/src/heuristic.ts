@@ -3,7 +3,7 @@
  * Hard keywords add +2 (user-adjusted).
  */
 
-import type { Complexity } from "./types.js";
+import type { Complexity } from "./types.ts";
 
 export interface HeuristicContext {
   hasFiles?: boolean;

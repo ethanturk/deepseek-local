@@ -9,18 +9,20 @@
  * - Validate after a turn ends
  * - On validation fail → re-generate last assistant response on higher tier
  * - Stickiness configurable (default: current turn)
- * - Virtual model exposed in picker
+ * - Virtual model exposed in picker via LlmAdapter registration
  * - Subagents start one tier below parent
  * - Classifier/validator failure → put user in the loop
  * - Persist decisions to session event log
  * - Local guardrails follow per-tier boolean (default false)
  *
- * NOTE: Event names, ModelSelection APIs, and session event shapes are based on
- * the public architecture docs and community tier-router patterns. Adjust imports
- * and listener signatures against the exact packages installed in your checkout
- * (developer preview moves quickly).
+ * Harness API notes (v0.1.0-rc.7):
+ * - agent/pre-step payload: { agent, messages, turn, step, signal }
+ * - agent/request waterfall: (payload, next) => LlmCallConfig (return replacement)
+ * - agent/request-error waterfall: (payload, next) => RequestErrorAction
+ * - LlmAdapter is the registration mechanism for models to appear in the picker
  */
 
+import fs from "node:fs";
 import type { Context } from "@deepseek-ai/cordis";
 import {
   type Complexity,
@@ -29,11 +31,11 @@ import {
   type RouterState,
   type TierId,
   DEFAULT_CONFIG,
-} from "./types.js";
-import { classifyHeuristic } from "./heuristic.js";
+} from "./types.ts";
+import { classifyHeuristic } from "./heuristic.ts";
 
 export const name = "dsh-model-router";
-export const inject = ["llm", "systemPrompt", "tools", "sessions"];
+export const inject = ["llm", "systemPrompt", "tools", "sessions", "agents"];
 
 /** Merge user config over defaults. */
 function resolveConfig(raw?: Partial<ModelRouterConfig>): ModelRouterConfig {
@@ -71,6 +73,7 @@ function oneTierBelow(current: TierId): TierId {
 export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
   const config = resolveConfig(rawConfig);
   const state = new Map<string, RouterState>();
+  const llm = (ctx as any).llm;
 
   // ---------- helpers ----------
 
@@ -84,6 +87,9 @@ export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
         lastValidation: null,
         stickyUntil: null,
         pendingRegenerate: false,
+        reasoningEffortDisabled: false,
+        lastReasoningEffortError: null,
+        lastUserMessage: null,
       };
       state.set(agentId, s);
     }
@@ -101,8 +107,6 @@ export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
     payload: Record<string, unknown>,
   ) {
     try {
-      // Preferred: durable session event so it appears in Trajectory and survives resume.
-      // Exact API varies; community plugins often use session/event or a custom extension.
       const sessions = (ctx as any).sessions;
       if (sessions?.appendEvent) {
         sessions.appendEvent({
@@ -122,11 +126,11 @@ export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
   /** Put the user in the loop when classifier or validator itself fails. */
   function notifyUserInLoop(agentId: string, reason: string) {
     try {
-      // Soft injection so the user sees the problem and can act.
       const agents = (ctx as any).agents;
-      if (agents?.get?.(agentId)?.inject) {
-        agents.get(agentId).inject({
-          role: "system",
+      const agent = agents?.get?.(agentId);
+      if (agent?.inject) {
+        agent.inject({
+          role: "user",
           content: `[Model Router] Automatic routing paused: ${reason}. Please choose a model manually or re-send your message.`,
         });
       } else {
@@ -138,11 +142,6 @@ export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
     }
   }
 
-  /**
-   * Write the chosen provider/model into the live selection seam.
-   * Community tier routers typically write the session request header or
-   * mutate ModelSelection so api-proxy / agent-loop pick it up.
-   */
   /** Detect errors caused by unsupported / flaky reasoningEffort. */
   function isReasoningEffortError(err: unknown): boolean {
     const text = String(
@@ -159,69 +158,6 @@ export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
     );
   }
 
-  function applyModelSelection(agentId: string, tierId: TierId) {
-    const tier = tierConfig(tierId);
-    if (!tier) return;
-    const s = getOrCreateState(agentId);
-
-    try {
-      // Pattern used by community plugins (dsh-tier-router etc.):
-      // write into session request header / ModelSelectionRef.
-      // ModelSelection in Harness includes optional reasoningEffort.
-      const selection: {
-        provider: string;
-        model: string;
-        reasoningEffort?: string;
-      } = {
-        provider: tier.provider,
-        model: tier.model,
-      };
-      // Skip effort if we already learned it fails for this agent/session
-      if (
-        !s.reasoningEffortDisabled &&
-        tier.reasoningEffort !== undefined
-      ) {
-        selection.reasoningEffort = tier.reasoningEffort;
-      }
-
-      // Attempt common seams; the first one that exists wins.
-      const agent = (ctx as any).agents?.get?.(agentId);
-      if (agent?.setModelSelection) {
-        agent.setModelSelection(selection);
-      } else if ((ctx as any).agentDefaultModel?.setSelection) {
-        (ctx as any).agentDefaultModel.setSelection(selection);
-      }
-
-      // Also try rewriting live request options when present (agent/request path)
-      const live = (ctx as any).__modelRouterLiveRequest;
-      if (live && typeof live === "object") {
-        live.provider = tier.provider;
-        live.model = tier.model;
-        if (
-          !s.reasoningEffortDisabled &&
-          tier.reasoningEffort !== undefined
-        ) {
-          live.reasoningEffort = tier.reasoningEffort;
-        } else {
-          delete live.reasoningEffort;
-        }
-      }
-
-      emitDecision(agentId, "selection", {
-        tierId,
-        provider: tier.provider,
-        model: tier.model,
-        reasoningEffort: s.reasoningEffortDisabled
-          ? null
-          : (tier.reasoningEffort ?? null),
-        reasoningEffortDisabled: Boolean(s.reasoningEffortDisabled),
-      });
-    } catch (err) {
-      console.warn("[dsh-model-router] applyModelSelection failed", err);
-      notifyUserInLoop(agentId, `Could not apply model selection: ${err}`);
-    }
-  }
-
   // ---------- LLM classifier (tiny prompt) ----------
 
   async function classifyWithLlm(message: string): Promise<Complexity | null> {
@@ -229,7 +165,6 @@ export function apply(ctx: Context, rawConfig?: Partial<ModelRouterConfig>) {
     if (!provider || !model) return null;
 
     try {
-      const llm = (ctx as any).llm;
       if (!llm?.generate && !llm?.stream) {
         console.warn("[dsh-model-router] llm service unavailable for classifier");
         return null;
@@ -241,7 +176,6 @@ Reply with exactly one word: simple, medium, or hard.
 Request:
 ${message.slice(0, 2000)}`;
 
-      // Prefer a non-streaming one-shot if available; otherwise collect stream.
       let text = "";
       if (typeof llm.generate === "function") {
         const res = await llm.generate({
@@ -252,7 +186,6 @@ ${message.slice(0, 2000)}`;
         });
         text = (res?.content ?? res?.text ?? "").toString().trim().toLowerCase();
       } else {
-        // Fallback: stream and concatenate
         for await (const chunk of llm.stream({
           provider,
           model,
@@ -283,7 +216,6 @@ ${message.slice(0, 2000)}`;
     if (mode === "heuristic" || mode === "both") {
       const h = classifyHeuristic(message, context);
       if (mode === "heuristic") return h;
-      // "both": use heuristic unless we want a second opinion on medium / ambiguous
       if (h !== "medium") return h;
     }
 
@@ -291,12 +223,10 @@ ${message.slice(0, 2000)}`;
       const llmResult = await classifyWithLlm(message);
       if (llmResult) return llmResult;
       if (mode === "both") {
-        // LLM failed – fall back to heuristic result already computed, or recompute
         return classifyHeuristic(message, context);
       }
     }
 
-    // Absolute fallback
     return "medium";
   }
 
@@ -312,10 +242,9 @@ ${message.slice(0, 2000)}`;
     }
 
     try {
-      const llm = (ctx as any).llm;
       if (!llm?.generate && !llm?.stream) {
         notifyUserInLoop("unknown", "Validator LLM unavailable");
-        return { passed: true }; // fail-open to avoid blocking
+        return { passed: true };
       }
 
       const prompt = `You are a strict judge. Evaluate whether the assistant's response correctly and completely addresses the user request.
@@ -359,13 +288,12 @@ ${assistantResponse.slice(0, 3000)}`;
         const reason = text.replace(/^FAIL\s*:?\s*/i, "").trim() || "unspecified";
         return { passed: false, reason };
       }
-      // Ambiguous judge output – treat as pass but log
       console.warn("[dsh-model-router] ambiguous validator reply:", text);
       return { passed: true, reason: "ambiguous judge output" };
     } catch (err) {
       console.warn("[dsh-model-router] validator failed", err);
       notifyUserInLoop("unknown", `Validation failed: ${err}`);
-      return { passed: true }; // fail-open
+      return { passed: true };
     }
   }
 
@@ -384,49 +312,192 @@ ${assistantResponse.slice(0, 3000)}`;
     }
   }
 
-  // ---------- Virtual model registration ----------
-  // Exact registration depends on the installed llm / catalog seams.
-  // Community pattern: register a synthetic provider/model that the picker shows.
-  try {
-    const llm = (ctx as any).llm;
-    if (llm?.registerVirtualModel) {
-      llm.registerVirtualModel({
-        id: config.virtualModel.id,
+  // ========================================================
+  // VIRTUAL MODEL — register via LlmAdapter so it appears in the picker
+  // ========================================================
+
+  /**
+   * Minimal LlmAdapter that represents the virtual "Auto (Tiered Router)" model.
+   * Registered under the unique provider name config.virtualModel.id
+   * so it appears in its own group in the model picker.
+   */
+  const VIRTUAL_PROVIDER = config.virtualModel.id; // "auto-tier"
+
+  class TieredRouterAdapter {
+    /** LlmAdapter.providerInfo — metadata for the virtual provider route */
+    providerInfo(provider: string) {
+      console.log(`[dsh-model-router] adapter.providerInfo("${provider}")`);
+      return {
+        id: provider,
+        name: provider,
         displayName: config.virtualModel.displayName,
-        description: "Automatic tiered routing (fast → medium → smart)",
-      });
-    } else {
-      console.log(
-        `[dsh-model-router] Virtual model "${config.virtualModel.displayName}" ` +
-          `(id=${config.virtualModel.id}) – register via your catalog/settings if the seam is unavailable.`,
-      );
+      };
     }
-  } catch (err) {
-    console.warn("[dsh-model-router] virtual model registration skipped", err);
+
+    /** LlmAdapter.providerRetryPolicy — retry policy for the provider */
+    providerRetryPolicy(_provider: string) {
+      console.log(`[dsh-model-router] adapter.providerRetryPolicy("${_provider}")`);
+      return { maxRetries: 3, retryDelay: 1000 };
+    }
+
+    /** LlmAdapter.listModels — return the virtual model for this provider */
+    listModels(provider: string) {
+      console.log(`[dsh-model-router] adapter.listModels("${provider}")`);
+      return Promise.resolve([
+        {
+          provider,
+          id: config.virtualModel.id,
+          name: config.virtualModel.displayName,
+          description: "Automatic tiered routing (fast → medium → smart)",
+          reasoning: {
+            supported: true,
+            defaultEffort: "high",
+          },
+        },
+      ]);
+    }
+
+    /** LlmAdapter.resolveModel — exact model metadata for the catalog */
+    resolveModel(provider: string, model: string, _signal?: AbortSignal) {
+      const debugLog = '/tmp/dsh-stream-debug.log';
+      fs.writeFileSync(debugLog, 'resolveModel: provider=' + provider + ' model=' + model + '\n' + new Error().stack + '\n---\n', { flag: 'a' });
+      // Always return a valid object — Harness validates resolved.name.length etc.
+      // For pass-through unknown models, echo the requested model info
+      if (model !== config.virtualModel.id) {
+        return Promise.resolve({
+          provider,
+          id: model,
+          name: model,
+        });
+      }
+      return Promise.resolve({
+        provider,
+        id: model,
+        name: config.virtualModel.displayName,
+        description: "Automatic tiered routing (fast → medium → smart)",
+        // Don't include reasoning here — Harness expects reasoning.efforts[]
+        // with { id, name } objects; leaving it out lets Harness use defaults.
+      });
+    }
+
+    /** LlmAdapter.stream — delegate to the real provider after resolving the tier */
+    async *stream(options: {
+      provider: string;
+      model: string;
+      messages: Array<{ role: string; content: unknown }>;
+      maxTokens?: number;
+      reasoningEffort?: string;
+      temperature?: number;
+      signal?: AbortSignal;
+    }): AsyncIterable<{ text?: string; content?: string }> {
+      const debugLog = '/tmp/dsh-stream-debug.log';
+      fs.writeFileSync(debugLog, 'STREAM CALLED: provider=' + options.provider + ' model=' + options.model + '\n', { flag: 'a' });
+      try {
+        fs.writeFileSync(debugLog, 'stream: messages=' + (options.messages?.length ?? 'null') + '\n', { flag: 'a' });
+
+        // Resolve the tier for the current agent
+        const activeAgentId = (ctx as any).agents?.currentAgent?.()?.id;
+        const tierId = activeAgentId ? state.get(activeAgentId)?.currentTierId : "medium";
+        console.log(`[dsh-model-router] resolved tierId="${tierId}" (activeAgentId="${activeAgentId}")`);
+        const tier = tierConfig(tierId);
+        if (!tier) {
+          throw new Error(`No tier configured for current routing state`);
+        }
+        console.log(`[dsh-model-router] routing to tier: ${tier.provider}/${tier.model}`);
+
+        // Build the actual LlmCallConfig for the real provider/model
+        const callConfig = {
+        provider: tier.provider,
+        model: tier.model,
+        reasoningEffort: options.reasoningEffort ?? tier.reasoningEffort,
+        temperature: options.temperature,
+        maxTokens: options.maxTokens,
+        messages: options.messages,
+        signal: options.signal,
+      };
+
+      // Delegate to the real LLM stream
+      if (llm?.stream) {
+        let chunkCount = 0;
+        for await (const chunk of llm.stream(callConfig)) {
+          chunkCount++;
+          // Log first chunk to debug chunk structure
+          if (chunkCount === 1) {
+            console.log(`[dsh-model-router] stream() first chunk keys: ${JSON.stringify(Object.keys(chunk ?? {}))}, chunk type: ${typeof chunk}, chunk raw: ${JSON.stringify(chunk)?.slice(0, 200)}`);
+          }
+          // Extract text content — the Harness expects { text: string }
+          // or { content: string } from stream chunks. Don't pass through raw objects.
+          const text = chunk?.text ?? chunk?.content ?? "";
+          if (text) {
+            yield { text };
+          } else if (chunkCount <= 3) {
+            console.log(`[dsh-model-router] chunk ${chunkCount} yielded nothing (text="${text}", chunk=`, chunk, `)`);
+          }
+        }
+        console.log(`[dsh-model-router] stream() completed after ${chunkCount} chunks`);
+      } else {
+        // Fallback: use generate and yield as single chunk
+        console.warn("[dsh-model-router] stream() fallback using generate()");
+        const res = await llm?.generate(callConfig);
+        yield { text: res?.content ?? res?.text ?? "" };
+      }
+      console.log(`[dsh-model-router] stream() completed successfully`);
+    } catch (err) {
+      console.error(`[dsh-model-router] stream() error:`, err);
+      throw err;
+    }
+    }
   }
 
-  // ---------- Event: new user message → classify ----------
-  // Prefer the earliest point that sees a fresh user message.
-  // Common seams: agent/pre-step (when claim contains new user content),
-  // session/event for user/message, or inbox insertion.
+  // Register under a unique provider name so it doesn't conflict with built-in adapters
+  const adapter = new TieredRouterAdapter();
+  try {
+    llm.registerAdapter([VIRTUAL_PROVIDER], adapter);
+    console.log(
+      `[dsh-model-router] registered virtual adapter for provider "${VIRTUAL_PROVIDER}" ` +
+        `with model "${config.virtualModel.displayName}"`,
+    );
+  } catch (err) {
+    console.warn(
+      `[dsh-model-router] virtual adapter registration failed for "${VIRTUAL_PROVIDER}":`,
+      err,
+    );
+  }
 
-  ctx.on("agent/pre-step" as any, async (claim: any, next: any) => {
+  // ========================================================
+  // EVENT HANDLERS — Harness v0.1.0-rc.7 API
+  // ========================================================
+
+  // ---------- Event: new user message → classify (pre-step) ----------
+  ctx.on("agent/pre-step" as any, async (payload: any, next: any) => {
+    console.log(`[dsh-debug] agent/pre-step: agentId=${(payload?.agent?.id ?? "unknown")} msgCount=${(payload?.messages as any[] | undefined)?.length ?? 0}`);
     try {
-      const agentId =
-        claim?.agentId ?? claim?.agent?.id ?? claim?.id ?? "default";
+      const agent = payload?.agent;
+      const agentId = agent?.id ?? "unknown";
       const s = getOrCreateState(agentId);
+      try { fs.appendFileSync('/tmp/dsh-prestep-debug.log', `agent/pre-step: agentId=${agentId} msgCount=${(payload?.messages as any[] | undefined)?.length ?? 0}\n`); } catch {}
 
-      // Detect new user message (simplified – adapt to real claim shape)
-      const userText =
-        claim?.messages?.find((m: any) => m.role === "user")?.content ??
-        claim?.userMessage ??
-        claim?.text;
+      // Only classify on new user messages, not on every step
+      const messages = payload?.messages as any[] | undefined;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        console.log(`[dsh-debug] agent/pre-step: skipping (no messages)`);
+        return next?.() ?? undefined;
+      }
+
+      // Find the latest user message
+      let userText = "";
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]?.role === "user") {
+          userText = messages[i].content ?? "";
+          break;
+        }
+      }
 
       if (typeof userText === "string" && userText.trim()) {
         // Skip re-classification while sticky or while regenerating
         if (!s.stickyUntil && !s.pendingRegenerate) {
           const complexity = await classifyMessage(userText, {
-            // Optional context can be filled from tools/session later
+            recentToolFailures: s.recentToolFailures ?? 0,
           });
           const tierId = complexityToTier(complexity);
           s.lastClassification = complexity;
@@ -434,7 +505,6 @@ ${assistantResponse.slice(0, 3000)}`;
           s.lastUserMessage = userText;
           s.escalationCount = 0;
 
-          applyModelSelection(agentId, tierId);
           emitDecision(agentId, "classify", {
             complexity,
             tierId,
@@ -444,76 +514,78 @@ ${assistantResponse.slice(0, 3000)}`;
       }
     } catch (err) {
       console.warn("[dsh-model-router] pre-step classify error", err);
-      notifyUserInLoop("unknown", `Classification error: ${err}`);
     }
     return next?.() ?? undefined;
   });
 
-  // ---------- Event: force selected model + reasoningEffort on request ----------
-  ctx.on("agent/request" as any, async (request: any, next: any) => {
+  // ---------- Event: select model on each request (request waterfall) ----------
+  ctx.on("agent/request" as any, async (payload: any, next: any) => {
     try {
-      const agentId =
-        request?.agentId ?? request?.agent?.id ?? request?.id ?? "default";
+      const agent = payload?.agent;
+      const agentId = agent?.id ?? "unknown";
       const s = getOrCreateState(agentId);
       const tierId = s.currentTierId;
       const tier = tierConfig(tierId);
+      console.log(`[dsh-debug] agent/request: agentId=${agentId} tierId=${tierId}`);
 
-      // Mutate request options in place when the payload exposes them
-      if (request && typeof request === "object" && tier) {
-        const useEffort =
-          !s.reasoningEffortDisabled && tier.reasoningEffort !== undefined;
+      if (!tier) {
+        console.log(`[dsh-debug] agent/request: no tier, passing through`);
+        return next?.() ?? undefined;
+      }
 
-        if (request.options && typeof request.options === "object") {
-          request.options.provider = tier.provider;
-          request.options.model = tier.model;
-          if (useEffort) {
-            request.options.reasoningEffort = tier.reasoningEffort;
-          } else if ("reasoningEffort" in request.options) {
-            delete request.options.reasoningEffort;
-          }
-        }
-        if (request.config && typeof request.config === "object") {
-          request.config.provider = tier.provider;
-          request.config.model = tier.model;
-          if (useEffort) {
-            request.config.reasoningEffort = tier.reasoningEffort;
-          } else if ("reasoningEffort" in request.config) {
-            delete request.config.reasoningEffort;
-          }
-        }
-        // Direct fields on some builds
-        if ("provider" in request) request.provider = tier.provider;
-        if ("model" in request) request.model = tier.model;
-        if (useEffort) {
-          request.reasoningEffort = tier.reasoningEffort;
-        } else if ("reasoningEffort" in request) {
-          delete request.reasoningEffort;
+      // Get the default config from the waterfall
+      const defaultConfig = await next?.();
+      console.log(`[dsh-debug] agent/request: defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}`);
+      try { fs.appendFileSync('/tmp/dsh-request-debug.log', `agent/request: agentId=${agentId} tierId=${tierId} tier=${tier.provider}/${tier.model} defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}\n`); } catch {}
+
+      // Return a replacement with the selected tier's settings
+      const selection: Record<string, unknown> = {
+        provider: tier.provider,
+        model: tier.model,
+      };
+
+      // Add reasoningEffort if not disabled
+      if (!s.reasoningEffortDisabled && tier.reasoningEffort !== undefined) {
+        selection.reasoningEffort = tier.reasoningEffort;
+      } else if (defaultConfig?.reasoningEffort !== undefined) {
+        selection.reasoningEffort = undefined as any;
+      }
+
+      // Copy over any other fields from the default config
+      for (const key of ["temperature", "maxTokens", "stop"]) {
+        if (key in (defaultConfig || {})) {
+          (selection as any)[key] = (defaultConfig as any)[key];
         }
       }
 
-      applyModelSelection(agentId, tierId);
+      emitDecision(agentId, "selection", {
+        tierId,
+        provider: tier.provider,
+        model: tier.model,
+        reasoningEffort: s.reasoningEffortDisabled
+          ? null
+          : (tier.reasoningEffort ?? null),
+        reasoningEffortDisabled: Boolean(s.reasoningEffortDisabled),
+      });
+
+      return selection;
     } catch (err) {
       console.warn("[dsh-model-router] agent/request error", err);
+      return next?.() ?? undefined;
     }
-    return next?.() ?? undefined;
   });
 
   // ---------- Detect flaky / unsupported reasoningEffort ----------
-  // Harness surfaces provider failures on agent/request-error (and similar).
-  const onRequestError = (payload: any) => {
+  const onRequestError = async (payload: any, next: any) => {
     try {
-      const agentId =
-        payload?.agentId ??
-        payload?.agent?.id ??
-        payload?.request?.agentId ??
-        "default";
-      const err =
-        payload?.error ?? payload?.err ?? payload?.reason ?? payload;
+      const agent = payload?.agent;
+      const agentId = agent?.id ?? "unknown";
+      const err = payload?.failure ?? payload?.error ?? payload?.reason ?? payload;
 
-      if (!isReasoningEffortError(err)) return;
+      if (!isReasoningEffortError(err)) return await next?.();
 
       const s = getOrCreateState(agentId);
-      if (s.reasoningEffortDisabled) return; // already handled
+      if (s.reasoningEffortDisabled) return await next?.();
 
       s.reasoningEffortDisabled = true;
       s.lastReasoningEffortError = String(
@@ -526,17 +598,12 @@ ${assistantResponse.slice(0, 3000)}`;
         action: "disable-effort-and-retry",
       });
 
-      // Re-apply selection without effort
-      applyModelSelection(agentId, s.currentTierId);
-
-      // Soft notify — do not fully stop the user; auto-fallback is enough
       try {
-        const agents = (ctx as any).agents;
-        agents?.get?.(agentId)?.inject?.({
-          role: "system",
+        agent?.inject?.({
+          role: "user",
           content:
             `[Model Router] reasoningEffort was rejected by the provider (${s.lastReasoningEffortError}). ` +
-            `Retrying this tier without reasoning effort.`,
+            `This tier will retry without reasoning effort.`,
         });
       } catch {
         console.warn(
@@ -545,31 +612,20 @@ ${assistantResponse.slice(0, 3000)}`;
         );
       }
 
-      // Best-effort: trigger a follow-up / retry if the agent API allows it
-      try {
-        const agent = (ctx as any).agents?.get?.(agentId);
-        if (agent?.followup) {
-          void agent.followup(undefined, {
-            source: { kind: "model-router-effort-fallback" },
-          });
-        }
-      } catch {
-        // optional
-      }
+      return await next?.();
     } catch (e) {
       console.warn("[dsh-model-router] request-error handler failed", e);
+      return await next?.();
     }
   };
 
   ctx.on("agent/request-error" as any, onRequestError);
-  // Some builds use llm-level errors
-  ctx.on("llm/error" as any, onRequestError);
 
-  // ---------- Event: after turn ends → validate ----------
-  ctx.on("turn/end" as any, async (turn: any) => {
+  // ---------- Event: after turn ends ----------
+  ctx.on("agent/turn-stopping" as any, async (payload: any, next: any) => {
     try {
-      const agentId =
-        turn?.agentId ?? turn?.agent?.id ?? turn?.id ?? "default";
+      const agent = payload?.agent;
+      const agentId = agent?.id ?? "unknown";
       const s = getOrCreateState(agentId);
 
       // Clear turn-scoped stickiness
@@ -577,95 +633,26 @@ ${assistantResponse.slice(0, 3000)}`;
         s.stickyUntil = null;
       }
 
-      const userMessage = s.lastUserMessage ?? turn?.userMessage ?? "";
-      const assistantResponse =
-        turn?.assistantMessage ??
-        turn?.lastAssistant ??
-        turn?.content ??
-        "";
-
-      if (!userMessage || !assistantResponse) {
-        return;
-      }
-
-      const result = await validateTurn(userMessage, String(assistantResponse));
-      s.lastValidation = result;
-      emitDecision(agentId, "validate", {
-        passed: result.passed,
-        reason: result.reason,
-        tierId: s.currentTierId,
-      });
-
-      if (!result.passed) {
-        if (s.escalationCount >= config.validator.maxEscalations) {
-          notifyUserInLoop(
-            agentId,
-            `Validation failed after ${s.escalationCount} escalations: ${result.reason}`,
-          );
-          return;
-        }
-
-        const higher = nextHigherTier(s.currentTierId);
-        if (!higher) {
-          notifyUserInLoop(
-            agentId,
-            `Already on smartest tier and validation failed: ${result.reason}`,
-          );
-          return;
-        }
-
-        // Escalate and request re-generation of the last assistant response
-        s.escalationCount += 1;
-        s.currentTierId = higher;
-        s.pendingRegenerate = true;
-        s.stickyUntil =
-          config.validator.stickyScope === "session"
-            ? "end-of-session"
-            : "end-of-turn";
-
-        applyModelSelection(agentId, higher);
-        emitDecision(agentId, "escalate", {
-          to: higher,
-          reason: result.reason,
-          escalationCount: s.escalationCount,
-        });
-
-        // Trigger re-generation (exact API depends on Agent handle)
-        try {
-          const agent = (ctx as any).agents?.get?.(agentId);
-          if (agent?.regenerateLast || agent?.followup) {
-            if (agent.regenerateLast) {
-              await agent.regenerateLast();
-            } else {
-              await agent.followup(
-                `Previous response failed validation (${result.reason}). Please provide an improved answer.`,
-                { source: { kind: "model-router-escalate" } },
-              );
-            }
-          } else {
-            console.warn(
-              "[dsh-model-router] no regenerate/followup API – escalation recorded only",
-            );
-          }
-        } catch (err) {
-          notifyUserInLoop(agentId, `Escalation trigger failed: ${err}`);
-        }
-      } else {
-        s.pendingRegenerate = false;
+      // Decay recent failure counter
+      if (s.recentToolFailures !== undefined) {
+        s.recentToolFailures = Math.max(0, (s.recentToolFailures || 0) - 1);
       }
     } catch (err) {
-      console.warn("[dsh-model-router] turn/end validation error", err);
-      notifyUserInLoop("unknown", `Turn validation error: ${err}`);
+      console.warn("[dsh-model-router] turn-stopping error", err);
     }
+    return next?.() ?? undefined;
   });
 
   // ---------- Subagent: start one tier below parent ----------
-  // Listen for subagent creation if the seam exists.
-  ctx.on("agent/spawn" as any, (event: any) => {
+  ctx.on("agent/created" as any, (payload: any) => {
     try {
-      const parentId = event?.parentId ?? event?.parent?.id;
-      const childId = event?.agentId ?? event?.agent?.id ?? event?.id;
-      if (!parentId || !childId) return;
+      const agent = payload?.agent;
+      const childId = agent?.id;
+      if (!childId) return;
+
+      const parentAgent = (ctx as any).agents?.currentInitiator?.();
+      const parentId = parentAgent?.id;
+      if (!parentId) return;
 
       const parentState = state.get(parentId);
       const parentTier = parentState?.currentTierId ?? "medium";
@@ -673,7 +660,6 @@ ${assistantResponse.slice(0, 3000)}`;
 
       const childState = getOrCreateState(childId);
       childState.currentTierId = childTier;
-      applyModelSelection(childId, childTier);
       emitDecision(childId, "subagent-tier", {
         parentId,
         parentTier,
@@ -684,7 +670,7 @@ ${assistantResponse.slice(0, 3000)}`;
     }
   });
 
-  // ---------- Public service for local-model-guard & others ----------
+  // ---------- Expose service for local-model-guard & others ----------
   const service: ModelRouterService = {
     getCurrentTier(agentId: string) {
       return state.get(agentId)?.currentTierId;
@@ -704,14 +690,12 @@ ${assistantResponse.slice(0, 3000)}`;
         config.validator.stickyScope === "session"
           ? "end-of-session"
           : "end-of-turn";
-      applyModelSelection(agentId, tierId);
     },
     getState(agentId: string) {
       return state.get(agentId);
     },
   };
 
-  // Provide under a well-known key if Cordis service API is available
   try {
     if (typeof (ctx as any).provide === "function") {
       (ctx as any).provide("modelRouter", service);

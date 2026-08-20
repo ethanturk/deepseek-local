@@ -27,10 +27,10 @@ import {
   type GuardState,
   type LocalGuardConfig,
   DEFAULT_GUARD_CONFIG,
-} from "./types.js";
+} from "./types.ts";
 
 export const name = "dsh-local-model-guard";
-export const inject = ["tools"];
+export const inject = ["tools", "modelRouter"];
 
 function resolveConfig(raw?: Partial<LocalGuardConfig>): LocalGuardConfig {
   return { ...DEFAULT_GUARD_CONFIG, ...raw };
