@@ -9,6 +9,11 @@ type TestHandlers = Map<string, Handler> & { adapter?: any };
 function createHarness(options: {
   classifierMode?: "heuristic" | "llm" | "both";
   stream?: (options: any) => AsyncIterable<unknown>;
+  resolveModelInfo?: (
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ) => Promise<Record<string, unknown>>;
   activeAgentId?: string;
 }) {
   const handlers = new Map<string, Handler>() as TestHandlers;
@@ -58,6 +63,7 @@ function createHarness(options: {
       registerAdapter(_providers: string[], adapter: unknown) {
         handlers.adapter = adapter;
       },
+      resolveModelInfo: options.resolveModelInfo,
       stream: options.stream,
     },
     on(event: string, handler: Handler) {
@@ -80,6 +86,81 @@ function createHarness(options: {
   applyRouter(ctx as never);
   return handlers;
 }
+
+test("virtual model exposes metadata for the tier selected during pre-step", async () => {
+  const signal = new AbortController().signal;
+  const resolvedRoutes: string[] = [];
+  const handlers = createHarness({
+    resolveModelInfo: async (provider, model) => {
+      resolvedRoutes.push(`${provider}/${model}`);
+      return {
+        provider,
+        id: model,
+        name: "Smart model",
+        inputModalities: ["text", "image"],
+        context: { contextWindow: 131_072 },
+        defaultMaxTokens: 16_384,
+        reasoning: {
+          efforts: [{ id: "high", name: "High" }],
+          defaultEffort: "high",
+        },
+      };
+    },
+    stream: async function* (options) {
+      if (options.provider === "remote" && options.model === "remote-classifier") {
+        yield* textStream("hard");
+      }
+    },
+  });
+  const messages = [
+    { role: "user", content: "Refactor the authentication flow safely." },
+  ];
+  const agent = {
+    id: "metadata-agent",
+    session: { deriveMessages: () => messages },
+  };
+
+  await handlers.get("agent/pre-step")?.(
+    { agent, messages, signal },
+    () => undefined,
+  );
+  const metadata = await handlers.adapter.resolveModel(
+    "auto-tier",
+    "auto-tier",
+    signal,
+  );
+
+  assert.deepEqual(metadata, {
+    provider: "auto-tier",
+    id: "auto-tier",
+    name: "Auto (Tiered Router)",
+    description: "Automatic tiered routing (fast → medium → smart)",
+    inputModalities: ["text", "image"],
+    context: { contextWindow: 131_072 },
+    defaultMaxTokens: 16_384,
+    reasoning: {
+      efforts: [{ id: "high", name: "High" }],
+      defaultEffort: "high",
+    },
+  });
+  assert.deepEqual(resolvedRoutes, ["remote/remote-smart"]);
+
+  const laterStepSignal = new AbortController().signal;
+  await handlers.get("agent/pre-step")?.(
+    { agent, messages: [], signal: laterStepSignal },
+    () => undefined,
+  );
+  await handlers.adapter.resolveModel(
+    "auto-tier",
+    "auto-tier",
+    laterStepSignal,
+  );
+
+  assert.deepEqual(resolvedRoutes, [
+    "remote/remote-smart",
+    "remote/remote-smart",
+  ]);
+});
 
 test("virtual route stays selected while its adapter delegates to the chosen tier", async () => {
   let routedOptions: any;

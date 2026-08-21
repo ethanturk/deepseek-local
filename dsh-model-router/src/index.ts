@@ -22,7 +22,6 @@
  * - LlmAdapter is the registration mechanism for models to appear in the picker
  */
 
-import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
@@ -453,44 +452,44 @@ ${assistantResponse.slice(0, 3000)}`;
           id: config.virtualModel.id,
           name: config.virtualModel.displayName,
           description: "Automatic tiered routing (fast → medium → smart)",
-          reasoning: {
-            supported: true,
-            defaultEffort: "high",
-          },
         },
       ]);
     }
 
     /** LlmAdapter.resolveModel — exact model metadata for the catalog */
-    resolveModel(provider: string, model: string, _signal?: AbortSignal) {
-      const debugLog = '/tmp/dsh-stream-debug.log';
-      fs.writeFileSync(debugLog, 'resolveModel: provider=' + provider + ' model=' + model + '\n' + new Error().stack + '\n---\n', { flag: 'a' });
+    async resolveModel(provider: string, model: string, signal?: AbortSignal) {
       // Always return a valid object — Harness validates resolved.name.length etc.
       // For pass-through unknown models, echo the requested model info
       if (model !== config.virtualModel.id) {
-        return Promise.resolve({
+        return {
           provider,
           id: model,
           name: model,
-        });
+        };
       }
-      return Promise.resolve({
+
+      const activeAgentId = (ctx as any).agents?.currentAgent?.()?.id;
+      const tierId =
+        (signal && tierBySignal.get(signal)) ??
+        (activeAgentId ? state.get(activeAgentId)?.currentTierId : undefined) ??
+        "medium";
+      const tier = tierConfig(tierId);
+      const physical = tier && typeof llm?.resolveModelInfo === "function"
+        ? await llm.resolveModelInfo(tier.provider, tier.model, signal)
+        : {};
+
+      return {
+        ...physical,
         provider,
         id: model,
         name: config.virtualModel.displayName,
         description: "Automatic tiered routing (fast → medium → smart)",
-        // Don't include reasoning here — Harness expects reasoning.efforts[]
-        // with { id, name } objects; leaving it out lets Harness use defaults.
-      });
+      };
     }
 
     /** LlmAdapter.stream — delegate to the real provider after resolving the tier */
     async *stream(options: Record<string, any>): AsyncIterable<unknown> {
-      const debugLog = '/tmp/dsh-stream-debug.log';
-      fs.writeFileSync(debugLog, 'STREAM CALLED: provider=' + options.provider + ' model=' + options.model + '\n', { flag: 'a' });
       try {
-        fs.writeFileSync(debugLog, 'stream: messages=' + (options.messages?.length ?? 'null') + '\n', { flag: 'a' });
-
         // Resolve the tier for the current agent
         const activeAgentId = (ctx as any).agents?.currentAgent?.()?.id;
         const tierId =
@@ -547,7 +546,9 @@ ${assistantResponse.slice(0, 3000)}`;
       const agent = payload?.agent;
       const agentId = agent?.id ?? "unknown";
       const s = getOrCreateState(agentId);
-      try { fs.appendFileSync('/tmp/dsh-prestep-debug.log', `agent/pre-step: agentId=${agentId} msgCount=${(payload?.messages as any[] | undefined)?.length ?? 0}\n`); } catch {}
+      if (payload?.signal && typeof payload.signal === "object") {
+        tierBySignal.set(payload.signal, s.currentTierId);
+      }
 
       // Only classify on new user messages, not on every step
       const messages = payload?.messages as any[] | undefined;
@@ -615,6 +616,9 @@ ${assistantResponse.slice(0, 3000)}`;
           });
         }
       }
+      if (payload?.signal && typeof payload.signal === "object") {
+        tierBySignal.set(payload.signal, s.currentTierId);
+      }
     } catch (err) {
       console.warn("[dsh-model-router] pre-step classify error", err);
     }
@@ -642,7 +646,6 @@ ${assistantResponse.slice(0, 3000)}`;
       // Get the default config from the waterfall
       const defaultConfig = await next?.();
       console.log(`[dsh-debug] agent/request: defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}`);
-      try { fs.appendFileSync('/tmp/dsh-request-debug.log', `agent/request: agentId=${agentId} tierId=${tierId} tier=${tier.provider}/${tier.model} defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}\n`); } catch {}
 
       const usesVirtualRoute =
         defaultConfig?.provider === VIRTUAL_PROVIDER &&
