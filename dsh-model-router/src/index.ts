@@ -23,6 +23,7 @@
  */
 
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import {
@@ -96,6 +97,41 @@ function resolveSettings(raw?: Partial<ModelRouterConfig>): ModelRouterConfig {
 }
 
 const TIER_ORDER: TierId[] = ["fast", "medium", "smart"];
+const COMPLEXITY_ORDER: Complexity[] = ["simple", "medium", "hard"];
+
+function higherComplexity(a: Complexity, b: Complexity): Complexity {
+  return COMPLEXITY_ORDER.indexOf(a) >= COMPLEXITY_ORDER.indexOf(b) ? a : b;
+}
+
+function messageText(message: any): string {
+  if (typeof message?.content === "string") return message.content;
+  if (!Array.isArray(message?.content)) return "";
+  return message.content
+    .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+    .map((block: any) => block.text)
+    .join("\n");
+}
+
+function recentConversation(messages: any[], latestUserIndex: number): string {
+  return messages
+    .slice(0, latestUserIndex + 1)
+    .filter((message) => message?.role === "user" || message?.role === "assistant")
+    .slice(-6)
+    .map((message) => `${message.role}: ${messageText(message).slice(0, 800)}`)
+    .join("\n");
+}
+
+function createRegenerationMessage(reason: string) {
+  return {
+    role: "user",
+    id: randomUUID(),
+    content: [{
+      type: "text",
+      text: `[Model Router] Regenerate the answer for the original request on the higher tier. Address this validation failure: ${reason}`,
+    }],
+    source: { kind: "plugin", id: name },
+  };
+}
 
 function complexityToTier(c: Complexity): TierId {
   if (c === "simple") return "fast";
@@ -226,7 +262,10 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
 
   // ---------- LLM classifier (tiny prompt) ----------
 
-  async function classifyWithLlm(message: string): Promise<Complexity | null> {
+  async function classifyWithLlm(
+    message: string,
+    conversation: string,
+  ): Promise<Complexity | null> {
     const { provider, model } = config.classifier;
     if (!provider || !model) return null;
 
@@ -236,10 +275,13 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
         return null;
       }
 
-      const prompt = `Classify the difficulty of the user request below.
+      const prompt = `Classify the difficulty of the current user request using the recent conversation for context.
 Reply with exactly one word: simple, medium, or hard.
 
-Request:
+Recent conversation:
+${conversation.slice(-3000)}
+
+Current request:
 ${message.slice(0, 2000)}`;
 
       let text = "";
@@ -276,21 +318,20 @@ ${message.slice(0, 2000)}`;
   async function classifyMessage(
     message: string,
     context?: { hasFiles?: boolean; recentToolFailures?: number },
+    conversation = message,
   ): Promise<Complexity> {
     const mode = config.classifier.mode;
+    const heuristic = classifyHeuristic(message, context);
 
-    if (mode === "heuristic" || mode === "both") {
-      const h = classifyHeuristic(message, context);
-      if (mode === "heuristic") return h;
-      if (h !== "medium") return h;
-    }
+    if (mode === "heuristic") return heuristic;
 
     if (mode === "llm" || mode === "both") {
-      const llmResult = await classifyWithLlm(message);
-      if (llmResult) return llmResult;
-      if (mode === "both") {
-        return classifyHeuristic(message, context);
+      const llmResult = await classifyWithLlm(message, conversation);
+      if (llmResult && mode === "both") {
+        return higherComplexity(heuristic, llmResult);
       }
+      if (llmResult) return llmResult;
+      if (mode === "both") return heuristic;
     }
 
     return "medium";
@@ -552,19 +593,27 @@ ${assistantResponse.slice(0, 3000)}`;
 
       // Find the latest user message
       let userText = "";
+      let latestUserIndex = -1;
       for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i]?.role === "user") {
-          userText = messages[i].content ?? "";
+          userText = messageText(messages[i]);
+          latestUserIndex = i;
           break;
         }
       }
 
       if (typeof userText === "string" && userText.trim()) {
         // Skip re-classification while sticky or while regenerating
-        if (!s.stickyUntil && !s.pendingRegenerate) {
+        if (
+          !s.stickyUntil &&
+          !s.pendingRegenerate &&
+          userText !== s.lastUserMessage
+        ) {
+          const conversation = recentConversation(messages, latestUserIndex);
           const complexity = await classifyMessage(userText, {
             recentToolFailures: s.recentToolFailures ?? 0,
-          });
+            hasFiles: /\b[\w.-]+\.(ts|tsx|js|jsx|py|go|rs|java|cpp|h|css|json|yaml|yml|md)\b/i.test(conversation),
+          }, conversation);
           const tierId = complexityToTier(complexity);
           s.lastClassification = complexity;
           s.currentTierId = tierId;
@@ -634,6 +683,8 @@ ${assistantResponse.slice(0, 3000)}`;
         reasoningEffortDisabled: Boolean(s.reasoningEffortDisabled),
       });
 
+      s.pendingRegenerate = false;
+
       return selection;
     } catch (err) {
       console.warn("[dsh-model-router] agent/request error", err);
@@ -702,6 +753,47 @@ ${assistantResponse.slice(0, 3000)}`;
       // Decay recent failure counter
       if (s.recentToolFailures !== undefined) {
         s.recentToolFailures = Math.max(0, (s.recentToolFailures || 0) - 1);
+      }
+
+      const messages = payload?.agent?.session?.deriveMessages?.();
+      if (!Array.isArray(messages) || !s.lastUserMessage) {
+        return next?.() ?? undefined;
+      }
+
+      let assistantResponse = "";
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]?.role === "assistant") {
+          assistantResponse = messageText(messages[i]);
+          break;
+        }
+      }
+      if (!assistantResponse.trim()) return next?.() ?? undefined;
+
+      const validation = await validateTurn(
+        s.lastUserMessage,
+        assistantResponse,
+      );
+      s.lastValidation = validation;
+      emitDecision(agentId, "validate", {
+        tierId: s.currentTierId,
+        ...validation,
+      });
+
+      if (!validation.passed) {
+        const nextTier = nextHigherTier(s.currentTierId);
+        if (nextTier && s.escalationCount < config.validator.maxEscalations) {
+          s.currentTierId = nextTier;
+          s.escalationCount += 1;
+          s.pendingRegenerate = true;
+          payload.agent.steer(createRegenerationMessage(
+            validation.reason ?? "unspecified validation failure",
+          ));
+          emitDecision(agentId, "escalate", {
+            tierId: nextTier,
+            escalationCount: s.escalationCount,
+            reason: validation.reason ?? "unspecified validation failure",
+          });
+        }
       }
     } catch (err) {
       console.warn("[dsh-model-router] turn-stopping error", err);

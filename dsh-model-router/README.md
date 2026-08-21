@@ -9,8 +9,8 @@ Inspired by NVIDIA NeMo Switchyard (LLM classifier + escalation), implemented as
 | Decision | Implementation |
 |----------|----------------|
 | Tiers | 3: `fast` → `medium` → `smart` |
-| Classifier | Heuristic first, LLM fallback (`mode: "both"`) |
-| When to classify | Every new user message |
+| Classifier | Conservative heuristic + LLM (`mode: "both"` keeps the more complex result) |
+| When to classify | Every new user message, using recent conversation context |
 | When to validate | After a turn ends |
 | On validation fail | Re-generate last assistant response on a higher tier |
 | Stickiness | Configurable; default = current turn |
@@ -89,7 +89,7 @@ if (enabled) {
 
 ## Developer-preview notes
 
-Event names (`agent/pre-step`, `agent/request`, `turn/end`, `agent/spawn`),  
+Event names (`agent/pre-step`, `agent/request`, `agent/turn-stopping`, `agent/created`),
 `ModelSelection` / request-header seams, and session-event append APIs can move.  
 The plugin uses defensive checks and logs when a seam is missing so you can adapt quickly.
 
