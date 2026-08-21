@@ -45,6 +45,8 @@ test("local guard requests the system prompt service used by its hint", () => {
 
 test("model router reads tier assignments from live DSH settings", async () => {
   const handlers = new Map<string, (payload: unknown, next: () => unknown) => unknown>();
+  let adapter: any;
+  let routedConfig: any;
   const localSettings = {
     tiers: [
       {
@@ -73,12 +75,18 @@ test("model router reads tier assignments from live DSH settings", async () => {
     },
   };
   const ctx = {
-    agents: {},
+    agents: { currentAgent: () => ({ id: "test-agent" }) },
     effect() { return () => {}; },
     inject(_dependencies: string[], callback: (context: unknown) => void) {
       callback(this);
     },
-    llm: { registerAdapter() {} },
+    llm: {
+      registerAdapter(_providers: string[], value: unknown) { adapter = value; },
+      async *stream(config: unknown) {
+        routedConfig = config;
+        yield { type: "finish", reason: { kind: "stop" } };
+      },
+    },
     on(event: string, handler: (payload: unknown, next: () => unknown) => unknown) {
       handlers.set(event, handler);
     },
@@ -104,9 +112,16 @@ test("model router reads tier assignments from live DSH settings", async () => {
   );
 
   assert.deepEqual(selection, {
-    provider: "local",
-    model: "local-medium",
+    provider: "auto-tier",
+    model: "auto-tier",
   });
+  for await (const _chunk of adapter.stream({
+    provider: "auto-tier",
+    model: "auto-tier",
+    messages: [],
+  })) {}
+  assert.equal(routedConfig.provider, "local");
+  assert.equal(routedConfig.model, "local-medium");
 });
 
 test("model router requests the DSH settings service", () => {

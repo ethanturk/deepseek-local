@@ -113,11 +113,22 @@ function messageText(message: any): string {
 }
 
 function recentConversation(messages: any[], latestUserIndex: number): string {
-  return messages
+  const eligible = messages
     .slice(0, latestUserIndex + 1)
-    .filter((message) => message?.role === "user" || message?.role === "assistant")
-    .slice(-6)
-    .map((message) => `${message.role}: ${messageText(message).slice(0, 800)}`)
+    .map((message, index) => ({ message, index, text: messageText(message).trim() }))
+    .filter(({ message, text }) =>
+      (message?.role === "assistant" ||
+        (message?.role === "user" &&
+          (!message?.source || message.source.kind === "user"))) &&
+      text,
+    );
+  const selected = new Map(
+    [...eligible.slice(-6), ...eligible.filter(({ message }) => message.role === "user").slice(-3)]
+      .map((entry) => [entry.index, entry]),
+  );
+  return [...selected.values()]
+    .sort((a, b) => a.index - b.index)
+    .map(({ message, text }) => `${message.role}: ${text.slice(0, 800)}`)
     .join("\n");
 }
 
@@ -176,6 +187,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     },
   );
   const state = new Map<string, RouterState>();
+  const tierBySignal = new WeakMap<object, TierId>();
   const llm = (ctx as any).llm;
   // ---------- helpers ----------
 
@@ -260,6 +272,39 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     );
   }
 
+  async function generateText(
+    provider: string,
+    model: string,
+    prompt: string,
+    maxTokens: number,
+  ): Promise<string> {
+    if (typeof llm?.stream !== "function") {
+      throw new Error("LLM stream service unavailable");
+    }
+
+    let text = "";
+    for await (const chunk of llm.stream({
+      provider,
+      model,
+      messages: [{
+        id: randomUUID(),
+        role: "user",
+        content: [{ type: "text", text: prompt }],
+        source: { kind: "plugin", plugin: name },
+      }],
+      maxTokens,
+    })) {
+      if (chunk?.type === "text-delta") text += chunk.text;
+      if (
+        chunk?.type === "finish" &&
+        (chunk.reason?.kind === "error" || chunk.reason?.kind === "aborted")
+      ) {
+        throw new Error(`LLM stream finished with ${chunk.reason.kind}`);
+      }
+    }
+    return text.trim();
+  }
+
   // ---------- LLM classifier (tiny prompt) ----------
 
   async function classifyWithLlm(
@@ -270,11 +315,6 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     if (!provider || !model) return null;
 
     try {
-      if (!llm?.generate && !llm?.stream) {
-        console.warn("[dsh-model-router] llm service unavailable for classifier");
-        return null;
-      }
-
       const prompt = `Classify the difficulty of the current user request using the recent conversation for context.
 Reply with exactly one word: simple, medium, or hard.
 
@@ -284,26 +324,7 @@ ${conversation.slice(-3000)}
 Current request:
 ${message.slice(0, 2000)}`;
 
-      let text = "";
-      if (typeof llm.generate === "function") {
-        const res = await llm.generate({
-          provider,
-          model,
-          messages: [{ role: "user", content: prompt }],
-          maxTokens: 8,
-        });
-        text = (res?.content ?? res?.text ?? "").toString().trim().toLowerCase();
-      } else {
-        for await (const chunk of llm.stream({
-          provider,
-          model,
-          messages: [{ role: "user", content: prompt }],
-        })) {
-          if (chunk?.text) text += chunk.text;
-          if (chunk?.content) text += chunk.content;
-        }
-        text = text.trim().toLowerCase();
-      }
+      const text = (await generateText(provider, model, prompt, 8)).toLowerCase();
 
       if (text.includes("hard")) return "hard";
       if (text.includes("medium")) return "medium";
@@ -349,11 +370,6 @@ ${message.slice(0, 2000)}`;
     }
 
     try {
-      if (!llm?.generate && !llm?.stream) {
-        notifyUserInLoop("unknown", "Validator LLM unavailable");
-        return { passed: true };
-      }
-
       const prompt = `You are a strict judge. Evaluate whether the assistant's response correctly and completely addresses the user request.
 Reply in this exact format:
 PASS
@@ -366,26 +382,7 @@ ${userMessage.slice(0, 1500)}
 Assistant response:
 ${assistantResponse.slice(0, 3000)}`;
 
-      let text = "";
-      if (typeof llm.generate === "function") {
-        const res = await llm.generate({
-          provider: smart.provider,
-          model: smart.model,
-          messages: [{ role: "user", content: prompt }],
-          maxTokens: 60,
-        });
-        text = (res?.content ?? res?.text ?? "").toString().trim();
-      } else {
-        for await (const chunk of llm.stream({
-          provider: smart.provider,
-          model: smart.model,
-          messages: [{ role: "user", content: prompt }],
-        })) {
-          if (chunk?.text) text += chunk.text;
-          if (chunk?.content) text += chunk.content;
-        }
-        text = text.trim();
-      }
+      const text = await generateText(smart.provider, smart.model, prompt, 60);
 
       const upper = text.toUpperCase();
       if (upper.startsWith("PASS")) {
@@ -488,15 +485,7 @@ ${assistantResponse.slice(0, 3000)}`;
     }
 
     /** LlmAdapter.stream — delegate to the real provider after resolving the tier */
-    async *stream(options: {
-      provider: string;
-      model: string;
-      messages: Array<{ role: string; content: unknown }>;
-      maxTokens?: number;
-      reasoningEffort?: string;
-      temperature?: number;
-      signal?: AbortSignal;
-    }): AsyncIterable<{ text?: string; content?: string }> {
+    async *stream(options: Record<string, any>): AsyncIterable<unknown> {
       const debugLog = '/tmp/dsh-stream-debug.log';
       fs.writeFileSync(debugLog, 'STREAM CALLED: provider=' + options.provider + ' model=' + options.model + '\n', { flag: 'a' });
       try {
@@ -504,7 +493,10 @@ ${assistantResponse.slice(0, 3000)}`;
 
         // Resolve the tier for the current agent
         const activeAgentId = (ctx as any).agents?.currentAgent?.()?.id;
-        const tierId = activeAgentId ? state.get(activeAgentId)?.currentTierId : "medium";
+        const tierId =
+          (options.signal && tierBySignal.get(options.signal)) ??
+          (activeAgentId ? state.get(activeAgentId)?.currentTierId : undefined) ??
+          "medium";
         console.log(`[dsh-model-router] resolved tierId="${tierId}" (activeAgentId="${activeAgentId}")`);
         const tier = tierConfig(tierId);
         if (!tier) {
@@ -512,47 +504,20 @@ ${assistantResponse.slice(0, 3000)}`;
         }
         console.log(`[dsh-model-router] routing to tier: ${tier.provider}/${tier.model}`);
 
-        // Build the actual LlmCallConfig for the real provider/model
         const callConfig = {
-        provider: tier.provider,
-        model: tier.model,
-        reasoningEffort: options.reasoningEffort ?? tier.reasoningEffort,
-        temperature: options.temperature,
-        maxTokens: options.maxTokens,
-        messages: options.messages,
-        signal: options.signal,
-      };
+          ...options,
+          provider: tier.provider,
+          model: tier.model,
+          reasoningEffort: options.reasoningEffort ?? tier.reasoningEffort,
+        };
 
-      // Delegate to the real LLM stream
-      if (llm?.stream) {
-        let chunkCount = 0;
         for await (const chunk of llm.stream(callConfig)) {
-          chunkCount++;
-          // Log first chunk to debug chunk structure
-          if (chunkCount === 1) {
-            console.log(`[dsh-model-router] stream() first chunk keys: ${JSON.stringify(Object.keys(chunk ?? {}))}, chunk type: ${typeof chunk}, chunk raw: ${JSON.stringify(chunk)?.slice(0, 200)}`);
-          }
-          // Extract text content — the Harness expects { text: string }
-          // or { content: string } from stream chunks. Don't pass through raw objects.
-          const text = chunk?.text ?? chunk?.content ?? "";
-          if (text) {
-            yield { text };
-          } else if (chunkCount <= 3) {
-            console.log(`[dsh-model-router] chunk ${chunkCount} yielded nothing (text="${text}", chunk=`, chunk, `)`);
-          }
+          yield chunk;
         }
-        console.log(`[dsh-model-router] stream() completed after ${chunkCount} chunks`);
-      } else {
-        // Fallback: use generate and yield as single chunk
-        console.warn("[dsh-model-router] stream() fallback using generate()");
-        const res = await llm?.generate(callConfig);
-        yield { text: res?.content ?? res?.text ?? "" };
+      } catch (err) {
+        console.error(`[dsh-model-router] stream() error:`, err);
+        throw err;
       }
-      console.log(`[dsh-model-router] stream() completed successfully`);
-    } catch (err) {
-      console.error(`[dsh-model-router] stream() error:`, err);
-      throw err;
-    }
     }
   }
 
@@ -609,7 +574,30 @@ ${assistantResponse.slice(0, 3000)}`;
           !s.pendingRegenerate &&
           userText !== s.lastUserMessage
         ) {
-          const conversation = recentConversation(messages, latestUserIndex);
+          let conversationMessages = messages;
+          let conversationUserIndex = latestUserIndex;
+          const sessionMessages = agent?.session?.deriveMessages?.();
+          if (Array.isArray(sessionMessages) && sessionMessages.length > 0) {
+            conversationMessages = sessionMessages;
+            conversationUserIndex = -1;
+            for (let i = sessionMessages.length - 1; i >= 0; i--) {
+              if (
+                sessionMessages[i]?.role === "user" &&
+                messageText(sessionMessages[i]) === userText
+              ) {
+                conversationUserIndex = i;
+                break;
+              }
+            }
+            if (conversationUserIndex < 0) {
+              conversationMessages = [...sessionMessages, messages[latestUserIndex]];
+              conversationUserIndex = conversationMessages.length - 1;
+            }
+          }
+          const conversation = recentConversation(
+            conversationMessages,
+            conversationUserIndex,
+          );
           const complexity = await classifyMessage(userText, {
             recentToolFailures: s.recentToolFailures ?? 0,
             hasFiles: /\b[\w.-]+\.(ts|tsx|js|jsx|py|go|rs|java|cpp|h|css|json|yaml|yml|md)\b/i.test(conversation),
@@ -641,6 +629,9 @@ ${assistantResponse.slice(0, 3000)}`;
       const s = getOrCreateState(agentId);
       const tierId = s.currentTierId;
       const tier = tierConfig(tierId);
+      if (payload?.signal && typeof payload.signal === "object") {
+        tierBySignal.set(payload.signal, tierId);
+      }
       console.log(`[dsh-debug] agent/request: agentId=${agentId} tierId=${tierId}`);
 
       if (!tier) {
@@ -653,11 +644,12 @@ ${assistantResponse.slice(0, 3000)}`;
       console.log(`[dsh-debug] agent/request: defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}`);
       try { fs.appendFileSync('/tmp/dsh-request-debug.log', `agent/request: agentId=${agentId} tierId=${tierId} tier=${tier.provider}/${tier.model} defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}\n`); } catch {}
 
-      // Return a replacement with the selected tier's settings
-      const selection: Record<string, unknown> = {
-        provider: tier.provider,
-        model: tier.model,
-      };
+      const usesVirtualRoute =
+        defaultConfig?.provider === VIRTUAL_PROVIDER &&
+        defaultConfig?.model === config.virtualModel.id;
+      const selection: Record<string, unknown> = usesVirtualRoute
+        ? { ...defaultConfig }
+        : { provider: tier.provider, model: tier.model };
 
       // Add reasoningEffort if not disabled
       if (!s.reasoningEffortDisabled && tier.reasoningEffort !== undefined) {

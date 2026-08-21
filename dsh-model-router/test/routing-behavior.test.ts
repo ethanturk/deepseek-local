@@ -4,12 +4,14 @@ import test from "node:test";
 import { apply as applyRouter } from "../src/index.ts";
 
 type Handler = (payload: any, next?: () => unknown) => unknown;
+type TestHandlers = Map<string, Handler> & { adapter?: any };
 
 function createHarness(options: {
   classifierMode?: "heuristic" | "llm" | "both";
-  generate?: (options: any) => Promise<unknown>;
+  stream?: (options: any) => AsyncIterable<unknown>;
+  activeAgentId?: string;
 }) {
-  const handlers = new Map<string, Handler>();
+  const handlers = new Map<string, Handler>() as TestHandlers;
   const settings = {
     tiers: [
       {
@@ -43,14 +45,20 @@ function createHarness(options: {
     },
   };
   const ctx = {
-    agents: {},
+    agents: {
+      currentAgent: () => options.activeAgentId
+        ? { id: options.activeAgentId }
+        : undefined,
+    },
     effect() { return () => {}; },
     inject(_dependencies: string[], callback: (context: unknown) => void) {
       callback(this);
     },
     llm: {
-      registerAdapter() {},
-      generate: options.generate,
+      registerAdapter(_providers: string[], adapter: unknown) {
+        handlers.adapter = adapter;
+      },
+      stream: options.stream,
     },
     on(event: string, handler: Handler) {
       handlers.set(event, handler);
@@ -73,37 +81,151 @@ function createHarness(options: {
   return handlers;
 }
 
-test("both mode uses recent context and keeps the higher classifier result", async () => {
-  let classifierPrompt = "";
+test("virtual route stays selected while its adapter delegates to the chosen tier", async () => {
+  let routedOptions: any;
+  const signal = new AbortController().signal;
   const handlers = createHarness({
-    generate: async (options) => {
-      classifierPrompt = options.messages[0].content;
-      return { content: "medium" };
+    stream: async function* (options) {
+      if (options.provider === "remote" && options.model === "remote-classifier") {
+        yield* textStream("hard");
+        return;
+      }
+      routedOptions = options;
+      yield* textStream("routed response");
     },
   });
+  const agent = {
+    id: "route-agent",
+    session: {
+      deriveMessages: () => [
+        { role: "user", content: "Refactor the authentication flow safely." },
+      ],
+    },
+  };
+
+  await handlers.get("agent/pre-step")?.(
+    { agent, messages: agent.session.deriveMessages() },
+    () => undefined,
+  );
+  const selection = await handlers.get("agent/request")?.(
+    { agent, signal },
+    () => ({ provider: "auto-tier", model: "auto-tier" }),
+  );
+  const chunks = [];
+  for await (const chunk of handlers.adapter.stream({
+    provider: "auto-tier",
+    model: "auto-tier",
+    messages: agent.session.deriveMessages(),
+    tools: [{ name: "read" }],
+    signal,
+  })) {
+    chunks.push(chunk);
+  }
+
+  assert.deepEqual(selection, { provider: "auto-tier", model: "auto-tier" });
+  assert.equal(routedOptions.provider, "remote");
+  assert.equal(routedOptions.model, "remote-smart");
+  assert.deepEqual(routedOptions.tools, [{ name: "read" }]);
+  assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
+});
+
+function modelPrompt(options: any): string | null {
+  const message = options.messages?.[0];
+  const text = message?.content?.find?.((block: any) => block?.type === "text")?.text;
+  return typeof message?.id === "string" &&
+    message.role === "user" &&
+    message.source?.kind === "plugin" &&
+    message.source.plugin === "dsh-model-router" &&
+    typeof text === "string"
+    ? text
+    : null;
+}
+
+async function* textStream(text: string) {
+  yield { type: "block-start", index: 0, blockType: "text" };
+  yield { type: "text-delta", index: 0, text };
+  yield { type: "block-end", index: 0, block: { type: "text", text } };
+  yield { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } };
+  yield { type: "finish", reason: { kind: "stop" } };
+}
+
+test("both mode keeps human prompts when synthetic user messages fill session history", async () => {
+  let classifierPrompt = "";
+  const handlers = createHarness({
+    stream: async function* (options) {
+      classifierPrompt = modelPrompt(options) ?? "";
+      if (!classifierPrompt) {
+        yield { type: "finish", reason: { kind: "error", message: "invalid message" } };
+        return;
+      }
+      yield* textStream(
+        classifierPrompt.includes("Refactor the authentication flow safely.")
+          ? "medium"
+          : "simple",
+      );
+    },
+  });
+  const syntheticNoise = [
+    {
+      role: "user",
+      content: "Current runtime context supersedes earlier snapshots.",
+      source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt" },
+    },
+    {
+      role: "user",
+      content: "<system-reminder>Skill catalog</system-reminder>",
+      source: { kind: "skill-catalog" },
+    },
+    { role: "assistant", content: "Inspecting implementation." },
+    {
+      role: "user",
+      content: "You are repeating the exact same tool call.",
+      source: { kind: "plugin", plugin: "repeat-tool-reminder" },
+    },
+    { role: "assistant", content: "Trying another approach." },
+    {
+      role: "user",
+      content: "Tool calls failed or repeated.",
+      source: { kind: "plugin", plugin: "dsh-local-model-guard" },
+    },
+  ];
+  const conversation = [
+    {
+      role: "user",
+      content: "Refactor the authentication flow safely.",
+      source: { kind: "user" },
+    },
+    ...syntheticNoise,
+    { role: "assistant", content: "I inspected the current implementation." },
+    { role: "user", content: "Fix it", source: { kind: "user" } },
+  ];
+  const agent = {
+    id: "context-agent",
+    session: { deriveMessages: () => conversation },
+  };
 
   await handlers.get("agent/pre-step")?.(
     {
-      agent: { id: "context-agent" },
-      messages: [
-        { role: "user", content: "Refactor the authentication flow safely." },
-        { role: "assistant", content: "I inspected the current implementation." },
-        { role: "user", content: "Fix it" },
-      ],
+      agent,
+      messages: [{ role: "user", content: "Fix it", source: { kind: "user" } }],
     },
     () => undefined,
   );
 
   const selection = await handlers.get("agent/request")?.(
-    { agent: { id: "context-agent" } },
+    { agent },
     () => ({ provider: "auto-tier", model: "auto-tier" }),
   );
 
   assert.match(classifierPrompt, /Refactor the authentication flow safely/);
   assert.match(classifierPrompt, /Fix it/);
+  assert.doesNotMatch(classifierPrompt, /Current runtime context/);
+  assert.doesNotMatch(classifierPrompt, /Skill catalog/);
+  assert.doesNotMatch(classifierPrompt, /repeating the exact same tool call/);
+  assert.doesNotMatch(classifierPrompt, /Tool calls failed or repeated/);
   assert.deepEqual(selection, {
-    provider: "local",
-    model: "local-medium",
+    provider: "auto-tier",
+    model: "auto-tier",
   });
 });
 
@@ -111,7 +233,13 @@ test("failed validation steers regeneration on the next tier", async () => {
   const steered: unknown[] = [];
   const handlers = createHarness({
     classifierMode: "heuristic",
-    generate: async () => ({ content: "FAIL: Missing regression coverage" }),
+    stream: async function* (options) {
+      if (!modelPrompt(options)) {
+        yield { type: "finish", reason: { kind: "error", message: "invalid message" } };
+        return;
+      }
+      yield* textStream("FAIL: Missing regression coverage");
+    },
   });
   const agent = {
     id: "validation-agent",
@@ -143,7 +271,7 @@ test("failed validation steers regeneration on the next tier", async () => {
 
   assert.equal(steered.length, 1);
   assert.deepEqual(selection, {
-    provider: "local",
-    model: "local-medium",
+    provider: "auto-tier",
+    model: "auto-tier",
   });
 });
