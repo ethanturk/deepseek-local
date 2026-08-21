@@ -1,14 +1,10 @@
-# Patch overlay for local development.
-# After cloning this repo, replace ABSOLUTE_REPO_ROOT with the clone path.
-#
-# Usage (from a deepseek-harness checkout):
-#   pnpm dsh web --patch /ABSOLUTE_REPO_ROOT/dsh-local-model-guard/cordis.yml
+# Bundle patch used by DSH plugin installation.
 #
 # Load together with the router via dsh-combined-patch.yml at the repo root.
 
 - insert:
     - id: dsh-local-model-guard
-      name: "/ABSOLUTE_REPO_ROOT/dsh-local-model-guard/src/index.ts"
+      name: "dsh-local-model-guard"
       # Optional config:
       # config:
       #   maxConsecutiveFailures: 2

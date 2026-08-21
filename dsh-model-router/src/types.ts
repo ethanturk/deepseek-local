@@ -30,7 +30,7 @@ export interface TierConfig {
 }
 
 export interface ClassifierConfig {
-  /** "heuristic" | "llm" | "both" (heuristic first, LLM fallback). */
+  /** "heuristic" | "llm" | "both" (use the more complex result). */
   mode: ClassifierMode;
   provider?: string;
   model?: string;
