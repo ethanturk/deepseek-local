@@ -4,7 +4,10 @@ import test from "node:test";
 import { apply as applyRouter } from "../src/index.ts";
 
 type Handler = (payload: any, next?: () => unknown) => unknown;
-type TestHandlers = Map<string, Handler> & { adapter?: any };
+type TestHandlers = Map<string, Handler> & {
+  adapter?: any;
+  modelRouter?: any;
+};
 
 function createHarness(options: {
   classifierMode?: "heuristic" | "llm" | "both";
@@ -69,7 +72,9 @@ function createHarness(options: {
     on(event: string, handler: Handler) {
       handlers.set(event, handler);
     },
-    provide() {},
+    provide(service: string, implementation: unknown) {
+      if (service === "modelRouter") handlers.modelRouter = implementation;
+    },
     sessions: {},
     settings: {
       register() {
@@ -86,6 +91,36 @@ function createHarness(options: {
   applyRouter(ctx as never);
   return handlers;
 }
+
+test("model failure escalation advances the tier for the active request", async () => {
+  const signal = new AbortController().signal;
+  const routedModels: string[] = [];
+  const handlers = createHarness({
+    activeAgentId: "failure-agent",
+    stream: async function* (options) {
+      routedModels.push(`${options.provider}/${options.model}`);
+    },
+  });
+
+  handlers.modelRouter.forceTier("failure-agent", "fast");
+  assert.equal(
+    handlers.modelRouter.escalateTier(
+      "failure-agent",
+      "CONTEXT_WINDOW_EXCEEDED",
+      signal,
+    ),
+    "medium",
+  );
+
+  for await (const _chunk of handlers.adapter.stream({
+    provider: "auto-tier",
+    model: "auto-tier",
+    messages: [],
+    signal,
+  })) {}
+
+  assert.deepEqual(routedModels, ["local/local-medium"]);
+});
 
 test("virtual model exposes metadata for the tier selected during pre-step", async () => {
   const signal = new AbortController().signal;

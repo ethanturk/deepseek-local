@@ -79,6 +79,11 @@ export interface ModelRouterService {
   getCurrentTier(agentId: string): TierId | undefined;
   getTierConfig(tierId: TierId): TierConfig | undefined;
   isLocalGuardrailsEnabled(agentId: string): boolean;
+  escalateTier(
+    agentId: string,
+    reason: string,
+    signal?: AbortSignal,
+  ): TierId | null;
   forceTier(agentId: string, tierId: TierId): void;
   getState(agentId: string): RouterState | undefined;
 }

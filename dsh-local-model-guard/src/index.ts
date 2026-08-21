@@ -252,6 +252,41 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     });
   }
 
+  // ---------- Recover model request failures ----------
+  ctx.on("agent/request-error" as any, async (payload: any, next: any) => {
+    let downstream: unknown;
+    try {
+      downstream = await next?.();
+    } catch (err) {
+      console.warn(
+        "[dsh-local-model-guard] downstream request recovery failed; " +
+          "preserving the original model failure",
+        err,
+      );
+    }
+    if ((downstream as any)?.kind === "retry") return downstream;
+
+    const signal = payload?.signal;
+    if (signal?.aborted) return downstream;
+    const agentId =
+      payload?.agentId ??
+      payload?.agent?.id ??
+      (ctx as any).agents?.currentAgent?.()?.id ??
+      "default";
+    if (!shouldEnforce(agentId)) return downstream;
+
+    const failure = payload?.failure ?? payload?.error ?? payload?.reason;
+    const code = String(failure?.code ?? "UNKNOWN");
+    const message = String(failure?.message ?? failure ?? "model request failed");
+    const reason = `${code}: ${message}`;
+    const router = (ctx as any).modelRouter;
+    const tierId = router?.escalateTier?.(agentId, reason, signal);
+    if (!tierId) return downstream;
+
+    emitGuardEvent(agentId, "model-failure-escalate", { code, tierId });
+    return { kind: "retry" };
+  });
+
   // ---------- Intervene before the model sees the next step ----------
   ctx.on("agent/pre-step" as any, async (claim: any, next: any) => {
     let recoveryReason: string | undefined;

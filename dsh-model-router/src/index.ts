@@ -836,6 +836,26 @@ ${assistantResponse.slice(0, 3000)}`;
       if (!tierId) return false;
       return tierConfig(tierId)?.enableLocalGuardrails ?? false;
     },
+    escalateTier(agentId: string, reason: string, signal?: AbortSignal) {
+      const s = getOrCreateState(agentId);
+      const nextTier = nextHigherTier(s.currentTierId);
+      if (!nextTier || s.escalationCount >= config.validator.maxEscalations) {
+        return null;
+      }
+      s.currentTierId = nextTier;
+      s.escalationCount += 1;
+      s.stickyUntil =
+        config.validator.stickyScope === "session"
+          ? "end-of-session"
+          : "end-of-turn";
+      if (signal) tierBySignal.set(signal, nextTier);
+      emitDecision(agentId, "request-failure-escalate", {
+        tierId: nextTier,
+        escalationCount: s.escalationCount,
+        reason,
+      });
+      return nextTier;
+    },
     forceTier(agentId: string, tierId: TierId) {
       const s = getOrCreateState(agentId);
       s.currentTierId = tierId;
