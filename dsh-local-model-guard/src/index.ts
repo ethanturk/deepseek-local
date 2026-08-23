@@ -69,6 +69,24 @@ function hasRepeatedSignature(
   return count >= maxRepeated;
 }
 
+function isOpaqueSubagentFailure(
+  exec: any,
+  result: any,
+): { agentId: string; reason: string; signal?: AbortSignal } | undefined {
+  const toolName = String(exec?.name ?? exec?.toolName ?? exec?.tool?.name ?? "");
+  if (toolName !== "subagent" || !Boolean(result?.isError ?? result?.error ?? result?.failed)) {
+    return undefined;
+  }
+  const failure = result?.error ?? result?.message ?? result?.content;
+  const message = String(failure?.message ?? failure ?? "").trim();
+  if (!/^subagent run failed(?:\b|:)/i.test(message)) return undefined;
+  return {
+    agentId: exec?.agentId ?? result?.agentId ?? exec?.agent?.id ?? "default",
+    reason: `SUBAGENT_RUN_FAILED: ${message}`,
+    signal: exec?.signal ?? result?.signal,
+  };
+}
+
 export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   const config = resolveConfig(rawConfig);
   const state = new Map<string, GuardState>();
@@ -203,6 +221,23 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   ctx.on("tools/post-execute" as any, async (exec: any, result: any, next: any) => {
     try {
       if (result && typeof result === "object") {
+        const subagentFailure = isOpaqueSubagentFailure(exec, result);
+        if (subagentFailure && shouldEnforce(subagentFailure.agentId)) {
+          const tierId = (ctx as any).modelRouter?.escalateTier?.(
+            subagentFailure.agentId,
+            subagentFailure.reason,
+            subagentFailure.signal,
+          );
+          if (tierId) {
+            const guardState = getOrCreate(subagentFailure.agentId);
+            guardState.pendingSubagentRetry =
+              "A delegated subagent ended with an opaque runtime failure. Retry the delegated task exactly once on this higher tier. If it fails again, do not retry it; report the failure and continue with an alternative approach.";
+            emitGuardEvent(subagentFailure.agentId, "subagent-failure-escalate", {
+              tierId,
+              reason: subagentFailure.reason,
+            });
+          }
+        }
         onToolOutcome({
           ...exec,
           ...result,
@@ -299,6 +334,11 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       }
 
       const s = getOrCreate(agentId);
+      if (s.pendingSubagentRetry) {
+        recoveryReason = s.pendingSubagentRetry;
+        s.pendingSubagentRetry = undefined;
+        emitGuardEvent(agentId, "subagent-retry-injected", {});
+      }
       const loop = hasRepeatedSignature(
         s.recentSignatures,
         config.maxRepeatedCalls,
@@ -306,7 +346,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       const tooManyFailures =
         s.consecutiveFailures >= config.maxConsecutiveFailures;
 
-      if (loop || tooManyFailures) {
+      if (!recoveryReason && (loop || tooManyFailures)) {
         const reason = loop
           ? `repeated tool signature (≥${config.maxRepeatedCalls})`
           : `consecutive tool failures (≥${config.maxConsecutiveFailures})`;

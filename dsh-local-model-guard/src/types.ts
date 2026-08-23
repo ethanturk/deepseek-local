@@ -37,6 +37,8 @@ export interface GuardState {
   consecutiveFailures: number;
   recentSignatures: string[];
   lastInterventionAt?: number;
+  /** One controlled retry instruction after an opaque subagent runtime failure. */
+  pendingSubagentRetry?: string;
   /** Optional recent tool failure count for heuristic context. */
   recentToolFailures: number;
 }

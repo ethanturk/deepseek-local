@@ -78,6 +78,57 @@ test("repeated tools add recovery to the pre-step decision", async () => {
   assert.match(JSON.stringify(decision.messages[0].content), /repeated tool signature/);
 });
 
+test("opaque subagent tool failure escalates the next model request", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const escalations: Array<{ agentId: string; reason: string }> = [];
+  const events: Array<Record<string, unknown>> = [];
+  const ctx = {
+    modelRouter: {
+      isLocalGuardrailsEnabled() { return true; },
+      escalateTier(agentId: string, reason: string) {
+        escalations.push({ agentId, reason });
+        return "medium";
+      },
+    },
+    sessions: {
+      appendEvent(event: Record<string, unknown>) { events.push(event); },
+    },
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  };
+
+  apply(ctx as any, {
+    enableRetries: false,
+    enableSystemPromptHint: false,
+    forceAlways: true,
+  });
+
+  const handler = handlers.get("tools/post-execute");
+  assert.ok(handler);
+  await handler(
+    { agentId: "agent-1", name: "subagent", arguments: { description: "inspect failure" } },
+    { isError: true, error: new Error("subagent run failed") },
+    async () => ({ kind: "accept" }),
+  );
+
+  const preStep = handlers.get("agent/pre-step");
+  assert.ok(preStep);
+  const nextStep = await preStep(
+    { agentId: "agent-1", messages: [] },
+    async () => ({ kind: "enter", messages: [] }),
+  ) as { kind: string; messages: Array<{ content: unknown }> };
+  assert.equal(nextStep.kind, "enter");
+  assert.equal(nextStep.messages.length, 1);
+  assert.match(JSON.stringify(nextStep.messages[0].content), /Retry the delegated task exactly once/);
+
+  assert.deepEqual(escalations, [{
+    agentId: "agent-1",
+    reason: "SUBAGENT_RUN_FAILED: subagent run failed",
+  }]);
+  assert.equal(events.some((event) => event.type === "local-guard/subagent-failure-escalate" && event.tierId === "medium"), true);
+});
+
 test("unrecovered model failures escalate and retry on the next tier", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const escalations: Array<{ agentId: string; reason: string; signal: AbortSignal }> = [];
