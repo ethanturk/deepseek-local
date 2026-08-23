@@ -203,6 +203,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
         reasoningEffortDisabled: false,
         lastReasoningEffortError: null,
         lastUserMessage: null,
+        routingPaused: false,
       };
       state.set(agentId, s);
     }
@@ -229,7 +230,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
           ts: Date.now(),
         });
       } else {
-        console.log(`[dsh-model-router] ${kind}`, { agentId, ...payload });
+        console.error(`[dsh-model-router] ${kind}`, { agentId, ...payload });
       }
     } catch (err) {
       console.warn("[dsh-model-router] failed to persist decision", err);
@@ -293,7 +294,9 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
       }],
       maxTokens,
     })) {
-      if (chunk?.type === "text-delta") text += chunk.text;
+      if (chunk?.type === "text-delta" && typeof chunk.text === "string") {
+        text += chunk.text;
+      }
       if (
         chunk?.type === "finish" &&
         (chunk.reason?.kind === "error" || chunk.reason?.kind === "aborted")
@@ -359,10 +362,36 @@ ${message.slice(0, 2000)}`;
 
   // ---------- Validator (smart tier judge) ----------
 
+  type ValidationResult = {
+    passed: boolean;
+    reason?: string;
+    routingPaused?: boolean;
+  };
+
+  function parseValidatorVerdict(text: unknown): ValidationResult | null {
+    if (typeof text !== "string") return null;
+    try {
+      const parsed = JSON.parse(text.trim());
+      if (!parsed || typeof parsed !== "object") return null;
+      const verdict = (parsed as any).verdict;
+      if (verdict === "pass") return { passed: true };
+      if (verdict === "fail") {
+        const reason = typeof (parsed as any).reason === "string"
+          ? (parsed as any).reason.trim() || "unspecified"
+          : "unspecified";
+        return { passed: false, reason };
+      }
+    } catch {
+      // The retry policy below handles malformed model output.
+    }
+    return null;
+  }
+
   async function validateTurn(
+    agentId: string,
     userMessage: string,
     assistantResponse: string,
-  ): Promise<{ passed: boolean; reason?: string }> {
+  ): Promise<ValidationResult> {
     const smart = tierConfig(config.validator.alwaysUseTierId);
     if (!smart) {
       return { passed: true, reason: "no smart tier configured" };
@@ -370,10 +399,10 @@ ${message.slice(0, 2000)}`;
 
     try {
       const prompt = `You are a strict judge. Evaluate whether the assistant's response correctly and completely addresses the user request.
-Reply in this exact format:
-PASS
+Reply with JSON only, with no prose or markdown:
+{"verdict":"pass"}
 or
-FAIL: <one-sentence reason>
+{"verdict":"fail","reason":"one-sentence reason"}
 
 User request:
 ${userMessage.slice(0, 1500)}
@@ -381,22 +410,20 @@ ${userMessage.slice(0, 1500)}
 Assistant response:
 ${assistantResponse.slice(0, 3000)}`;
 
-      const text = await generateText(smart.provider, smart.model, prompt, 60);
-
-      const upper = text.toUpperCase();
-      if (upper.startsWith("PASS")) {
-        return { passed: true };
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const text = await generateText(smart.provider, smart.model, prompt, 60);
+        const verdict = parseValidatorVerdict(text);
+        if (verdict) return verdict;
+        console.warn(`[dsh-model-router] invalid validator reply (attempt ${attempt}/2):`, text);
       }
-      if (upper.startsWith("FAIL")) {
-        const reason = text.replace(/^FAIL\s*:?\s*/i, "").trim() || "unspecified";
-        return { passed: false, reason };
-      }
-      console.warn("[dsh-model-router] ambiguous validator reply:", text);
-      return { passed: true, reason: "ambiguous judge output" };
+      const reason = "Validator returned malformed output twice; automatic routing paused.";
+      notifyUserInLoop(agentId, reason);
+      return { passed: true, reason, routingPaused: true };
     } catch (err) {
       console.warn("[dsh-model-router] validator failed", err);
-      notifyUserInLoop("unknown", `Validation failed: ${err}`);
-      return { passed: true };
+      const reason = `Validation failed: ${err}`;
+      notifyUserInLoop(agentId, reason);
+      return { passed: true, reason, routingPaused: true };
     }
   }
 
@@ -429,7 +456,7 @@ ${assistantResponse.slice(0, 3000)}`;
   class TieredRouterAdapter {
     /** LlmAdapter.providerInfo — metadata for the virtual provider route */
     providerInfo(provider: string) {
-      console.log(`[dsh-model-router] adapter.providerInfo("${provider}")`);
+      console.error(`[dsh-model-router] adapter.providerInfo("${provider}")`);
       return {
         id: provider,
         name: provider,
@@ -439,13 +466,13 @@ ${assistantResponse.slice(0, 3000)}`;
 
     /** LlmAdapter.providerRetryPolicy — retry policy for the provider */
     providerRetryPolicy(_provider: string) {
-      console.log(`[dsh-model-router] adapter.providerRetryPolicy("${_provider}")`);
+      console.error(`[dsh-model-router] adapter.providerRetryPolicy("${_provider}")`);
       return { maxRetries: 3, retryDelay: 1000 };
     }
 
     /** LlmAdapter.listModels — return the virtual model for this provider */
     listModels(provider: string) {
-      console.log(`[dsh-model-router] adapter.listModels("${provider}")`);
+      console.error(`[dsh-model-router] adapter.listModels("${provider}")`);
       return Promise.resolve([
         {
           provider,
@@ -492,16 +519,20 @@ ${assistantResponse.slice(0, 3000)}`;
       try {
         // Resolve the tier for the current agent
         const activeAgentId = (ctx as any).agents?.currentAgent?.()?.id;
+        const activeState = activeAgentId ? state.get(activeAgentId) : undefined;
+        if (activeState?.routingPaused) {
+          throw new Error("Automatic routing paused after validator failure; choose a physical model manually.");
+        }
         const tierId =
           (options.signal && tierBySignal.get(options.signal)) ??
           (activeAgentId ? state.get(activeAgentId)?.currentTierId : undefined) ??
           "medium";
-        console.log(`[dsh-model-router] resolved tierId="${tierId}" (activeAgentId="${activeAgentId}")`);
+        console.error(`[dsh-model-router] resolved tierId="${tierId}" (activeAgentId="${activeAgentId}")`);
         const tier = tierConfig(tierId);
         if (!tier) {
           throw new Error(`No tier configured for current routing state`);
         }
-        console.log(`[dsh-model-router] routing to tier: ${tier.provider}/${tier.model}`);
+        console.error(`[dsh-model-router] routing to tier: ${tier.provider}/${tier.model}`);
 
         const callConfig = {
           ...options,
@@ -524,7 +555,7 @@ ${assistantResponse.slice(0, 3000)}`;
   const adapter = new TieredRouterAdapter();
   try {
     llm.registerAdapter([VIRTUAL_PROVIDER], adapter);
-    console.log(
+    console.error(
       `[dsh-model-router] registered virtual adapter for provider "${VIRTUAL_PROVIDER}" ` +
         `with model "${config.virtualModel.displayName}"`,
     );
@@ -541,7 +572,7 @@ ${assistantResponse.slice(0, 3000)}`;
 
   // ---------- Event: new user message → classify (pre-step) ----------
   ctx.on("agent/pre-step" as any, async (payload: any, next: any) => {
-    console.log(`[dsh-debug] agent/pre-step: agentId=${(payload?.agent?.id ?? "unknown")} msgCount=${(payload?.messages as any[] | undefined)?.length ?? 0}`);
+    console.error(`[dsh-debug] agent/pre-step: agentId=${(payload?.agent?.id ?? "unknown")} msgCount=${(payload?.messages as any[] | undefined)?.length ?? 0}`);
     try {
       const agent = payload?.agent;
       const agentId = agent?.id ?? "unknown";
@@ -553,7 +584,7 @@ ${assistantResponse.slice(0, 3000)}`;
       // Only classify on new user messages, not on every step
       const messages = payload?.messages as any[] | undefined;
       if (!Array.isArray(messages) || messages.length === 0) {
-        console.log(`[dsh-debug] agent/pre-step: skipping (no messages)`);
+        console.error(`[dsh-debug] agent/pre-step: skipping (no messages)`);
         return next?.() ?? undefined;
       }
 
@@ -636,16 +667,16 @@ ${assistantResponse.slice(0, 3000)}`;
       if (payload?.signal && typeof payload.signal === "object") {
         tierBySignal.set(payload.signal, tierId);
       }
-      console.log(`[dsh-debug] agent/request: agentId=${agentId} tierId=${tierId}`);
+      console.error(`[dsh-debug] agent/request: agentId=${agentId} tierId=${tierId}`);
 
       if (!tier) {
-        console.log(`[dsh-debug] agent/request: no tier, passing through`);
+        console.error(`[dsh-debug] agent/request: no tier, passing through`);
         return next?.() ?? undefined;
       }
 
       // Get the default config from the waterfall
       const defaultConfig = await next?.();
-      console.log(`[dsh-debug] agent/request: defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}`);
+      console.error(`[dsh-debug] agent/request: defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}`);
 
       const usesVirtualRoute =
         defaultConfig?.provider === VIRTUAL_PROVIDER &&
@@ -765,10 +796,12 @@ ${assistantResponse.slice(0, 3000)}`;
       if (!assistantResponse.trim()) return next?.() ?? undefined;
 
       const validation = await validateTurn(
+        agentId,
         s.lastUserMessage,
         assistantResponse,
       );
       s.lastValidation = validation;
+      if (validation.routingPaused) s.routingPaused = true;
       emitDecision(agentId, "validate", {
         tierId: s.currentTierId,
         ...validation,
@@ -879,7 +912,7 @@ ${assistantResponse.slice(0, 3000)}`;
     (ctx as any).modelRouter = service;
   }
 
-  console.log(
+  console.error(
     `[dsh-model-router] loaded – virtual model "${config.virtualModel.displayName}", ` +
       `tiers: ${config.tiers.map((t) => t.id).join(" → ")}`,
   );

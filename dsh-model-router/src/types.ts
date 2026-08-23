@@ -73,6 +73,8 @@ export interface RouterState {
    */
   reasoningEffortDisabled?: boolean;
   lastReasoningEffortError?: string;
+  /** Automatic routing is suspended after the validator cannot produce a valid verdict. */
+  routingPaused?: boolean;
 }
 
 export interface ModelRouterService {

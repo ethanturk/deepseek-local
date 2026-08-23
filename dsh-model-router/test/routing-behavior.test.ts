@@ -345,6 +345,77 @@ test("both mode keeps human prompts when synthetic user messages fill session hi
   });
 });
 
+test("non-string model text deltas cannot break classifier routing", async () => {
+  const handlers = createHarness({
+    stream: async function* (options) {
+      if (modelPrompt(options)) {
+        yield { type: "text-delta", text: Symbol("malformed") };
+        yield* textStream("hard");
+      }
+    },
+  });
+  const message = { role: "user", content: "Hello", source: { kind: "user" } };
+  const agent = { id: "malformed-classifier-agent", session: { deriveMessages: () => [message] } };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+  assert.equal(handlers.modelRouter.getState(agent.id)?.currentTierId, "smart");
+});
+
+test("router diagnostics use stderr rather than the protocol stdout channel", () => {
+  const handlers = createHarness({});
+  const originalLog = console.log;
+  const originalError = console.error;
+  const stdout: unknown[][] = [];
+  const stderr: unknown[][] = [];
+  console.log = (...args: unknown[]) => stdout.push(args);
+  console.error = (...args: unknown[]) => stderr.push(args);
+  try {
+    handlers.adapter.providerInfo("auto-tier");
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+  assert.deepEqual(stdout, []);
+  assert.equal(stderr.length, 1);
+  assert.match(String(stderr[0][0]), /adapter\.providerInfo/);
+});
+
+test("malformed validator output is retried once then pauses automatic routing", async () => {
+  let validatorAttempts = 0;
+  const handlers = createHarness({
+    activeAgentId: "malformed-validator-agent",
+    classifierMode: "heuristic",
+    stream: async function* (options) {
+      if (modelPrompt(options)) {
+        validatorAttempts += 1;
+        yield* textStream("I will inspect the response before deciding.");
+      }
+    },
+  });
+  const messages = [
+    { role: "user", content: "Fix the issue", source: { kind: "user" } },
+    { role: "assistant", content: "A proposed fix." },
+  ];
+  const agent = {
+    id: "malformed-validator-agent",
+    session: { deriveMessages: () => messages },
+  };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [messages[0]] }, () => undefined);
+  await handlers.get("agent/turn-stopping")?.({ agent }, () => undefined);
+
+  assert.equal(validatorAttempts, 2);
+  assert.equal(handlers.modelRouter.getState(agent.id)?.routingPaused, true);
+  await assert.rejects(async () => {
+    for await (const _chunk of handlers.adapter.stream({
+      provider: "auto-tier",
+      model: "auto-tier",
+      messages,
+    })) {}
+  }, /Automatic routing paused/);
+});
+
 test("failed validation steers regeneration on the next tier", async () => {
   const steered: unknown[] = [];
   const handlers = createHarness({
@@ -354,7 +425,7 @@ test("failed validation steers regeneration on the next tier", async () => {
         yield { type: "finish", reason: { kind: "error", message: "invalid message" } };
         return;
       }
-      yield* textStream("FAIL: Missing regression coverage");
+      yield* textStream('{"verdict":"fail","reason":"Missing regression coverage"}');
     },
   });
   const agent = {

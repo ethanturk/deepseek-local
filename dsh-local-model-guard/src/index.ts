@@ -118,7 +118,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
           ts: Date.now(),
         });
       } else {
-        console.log(`[dsh-local-model-guard] ${kind}`, { agentId, ...payload });
+        console.error(`[dsh-local-model-guard] ${kind}`, { agentId, ...payload });
       }
     } catch (err) {
       console.warn("[dsh-local-model-guard] emit failed", err);
@@ -374,7 +374,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     }
   });
 
-  console.log(
+  console.error(
     `[dsh-local-model-guard] loaded – maxFailures=${config.maxConsecutiveFailures}, ` +
       `maxRepeated=${config.maxRepeatedCalls}, window=${config.windowSize}, ` +
       `retries=${config.enableRetries ? config.maxRetries : 0}, forceAlways=${config.forceAlways}`,
