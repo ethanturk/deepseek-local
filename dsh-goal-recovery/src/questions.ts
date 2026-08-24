@@ -52,3 +52,14 @@ export function choseResume(answer: unknown): boolean {
       && candidate.selected.includes("Resume goal");
   });
 }
+
+export function isRecoveryAnswer(answer: unknown): boolean {
+  if (!answer || typeof answer !== "object" || !Array.isArray((answer as { answers?: unknown }).answers)) {
+    return false;
+  }
+  return (answer as { answers: unknown[] }).answers.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const candidate = item as { id?: unknown; selected?: unknown };
+    return candidate.id === QUESTION_ID && Array.isArray(candidate.selected);
+  });
+}

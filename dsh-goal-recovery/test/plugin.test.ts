@@ -207,7 +207,16 @@ test("does not retry with a fresh ref when resume rejects stale revision", async
   assert.equal(harness.resumes.length, 1);
   assert.deepEqual(harness.resumes[0]!.ref, { id: "goal-1", revision: 3 });
   assert.deepEqual(harness.logs, [{
+    event: "goal-recovery/notice-opened",
+    agentId: "agent-1",
+    noticeKind: "resume-required",
+    goalId: "goal-1",
+    goalRevision: 3,
+    roundsStarted: 2,
+    maxGoalRounds: 8,
+  }, {
     event: "goal-recovery/resume-failed",
+    agentId: "agent-1",
     noticeKind: "resume-required",
     goalId: "goal-1",
     goalRevision: 3,
@@ -229,7 +238,16 @@ test("fails closed without retry when resume rejects an invalid transition", asy
 
   assert.equal(harness.resumes.length, 1);
   assert.deepEqual(harness.logs, [{
+    event: "goal-recovery/notice-opened",
+    agentId: "agent-1",
+    noticeKind: "resume-required",
+    goalId: "goal-1",
+    goalRevision: 3,
+    roundsStarted: 2,
+    maxGoalRounds: 8,
+  }, {
     event: "goal-recovery/resume-failed",
+    agentId: "agent-1",
     noticeKind: "resume-required",
     goalId: "goal-1",
     goalRevision: 3,
@@ -378,6 +396,28 @@ test("opens the round-limit notice when the live goal reaches its cap", async ()
   assert.equal(harness.asks.length, 1);
   assert.equal(harness.asks[0]!.questions[0]!.header, "Goal round limit");
   assert.equal(harness.asks[0]!.questions[0]!.question, "Goal stopped after 4/4 rounds.");
+  assert.deepEqual(harness.logs.map((entry) => (entry as { event: string }).event), [
+    "goal-recovery/notice-opened",
+    "goal-recovery/round-limit-acknowledged",
+  ]);
+  assert.ok(harness.logs.every((entry) => (entry as { agentId: string }).agentId === "agent-1"));
+});
+
+test("logs resume and leave-paused lifecycle outcomes", async () => {
+  for (const [selected, expectedEvent] of [
+    ["Resume goal", "goal-recovery/resumed"],
+    ["Leave paused", "goal-recovery/left-paused"],
+  ] as const) {
+    const harness = makeContext({ ask: async () => answer(selected) });
+    harness.emit("agent/session-start", makeAgent());
+    await flush();
+
+    assert.deepEqual(harness.logs.map((entry) => (entry as { event: string }).event), [
+      "goal-recovery/notice-opened",
+      expectedEvent,
+    ]);
+    assert.ok(harness.logs.every((entry) => (entry as { agentId: string }).agentId === "agent-1"));
+  }
 });
 
 test("makes zero model calls and registers no model hooks", async () => {
@@ -398,9 +438,18 @@ test("logs ASK_ABORTED structurally below warning level", async () => {
   await flush();
 
   assert.equal(harness.resumes.length, 0);
-  assert.deepEqual(harness.logLevels, ["debug"]);
+  assert.deepEqual(harness.logLevels, ["info", "debug"]);
   assert.deepEqual(harness.logs, [{
-    event: "goal-recovery/question-failed",
+    event: "goal-recovery/notice-opened",
+    agentId: "agent-1",
+    noticeKind: "resume-required",
+    goalId: "goal-1",
+    goalRevision: 3,
+    roundsStarted: 2,
+    maxGoalRounds: 8,
+  }, {
+    event: "goal-recovery/notice-failed",
+    agentId: "agent-1",
     noticeKind: "resume-required",
     goalId: "goal-1",
     goalRevision: 3,
@@ -409,6 +458,31 @@ test("logs ASK_ABORTED structurally below warning level", async () => {
     errorCode: "ASK_ABORTED",
     errorMessage: "safe ASK_ABORTED",
   }]);
+});
+
+test("warns and fails closed for a malformed answer", async () => {
+  const harness = makeContext({ ask: async () => ({ unexpected: true }) });
+
+  harness.emit("agent/session-start", makeAgent());
+  await flush();
+
+  assert.equal(harness.resumes.length, 0);
+  assert.deepEqual(harness.logLevels, ["info", "warn"]);
+  assert.deepEqual(harness.logs.map((entry) => (entry as { event: string }).event), [
+    "goal-recovery/notice-opened",
+    "goal-recovery/notice-failed",
+  ]);
+  assert.deepEqual(harness.logs[1], {
+    event: "goal-recovery/notice-failed",
+    agentId: "agent-1",
+    noticeKind: "resume-required",
+    goalId: "goal-1",
+    goalRevision: 3,
+    roundsStarted: 2,
+    maxGoalRounds: 8,
+    errorCode: "MALFORMED_ANSWER",
+    errorMessage: "Goal recovery question returned a malformed answer",
+  });
 });
 
 for (const code of ["CALLER_NOT_LIVE", "DELEGATED_CALLER", "NO_PROVIDER"]) {
@@ -421,9 +495,18 @@ for (const code of ["CALLER_NOT_LIVE", "DELEGATED_CALLER", "NO_PROVIDER"]) {
     await flush();
 
     assert.equal(harness.resumes.length, 0);
-    assert.deepEqual(harness.logLevels, ["warn"]);
+    assert.deepEqual(harness.logLevels, ["info", "warn"]);
     assert.deepEqual(harness.logs, [{
-      event: "goal-recovery/question-failed",
+      event: "goal-recovery/notice-opened",
+      agentId: "agent-1",
+      noticeKind: "resume-required",
+      goalId: "goal-1",
+      goalRevision: 3,
+      roundsStarted: 2,
+      maxGoalRounds: 8,
+    }, {
+      event: "goal-recovery/notice-failed",
+      agentId: "agent-1",
       noticeKind: "resume-required",
       goalId: "goal-1",
       goalRevision: 3,

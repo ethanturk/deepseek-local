@@ -1,6 +1,6 @@
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Context } from "@deepseek-ai/cordis";
-import { choseResume, recoveryQuestion } from "./questions.ts";
+import { choseResume, isRecoveryAnswer, recoveryQuestion } from "./questions.ts";
 import {
   classifyRecovery,
   latestTurnEnd,
@@ -21,12 +21,14 @@ function safeError(error: unknown): { errorCode: string; errorMessage: string } 
     return { errorCode: "UNKNOWN", errorMessage: String(error) };
   }
   const candidate = error as { code?: unknown; message?: unknown; name?: unknown };
+  let errorCode = "UNKNOWN";
+  if (typeof candidate.code === "string") {
+    errorCode = candidate.code;
+  } else if (typeof candidate.name === "string") {
+    errorCode = candidate.name;
+  }
   return {
-    errorCode: typeof candidate.code === "string"
-      ? candidate.code
-      : typeof candidate.name === "string"
-        ? candidate.name
-        : "UNKNOWN",
+    errorCode,
     errorMessage: typeof candidate.message === "string" ? candidate.message : "Goal recovery failed",
   };
 }
@@ -38,17 +40,20 @@ export function apply(ctx: Context): void {
   const controllers = new Set<AbortController>();
   let closed = false;
 
-  function logFailure(event: string, notice: RecoveryNotice, error: unknown): void {
-    const entry = {
-      event,
+  function noticeEntry(agent: Agent, notice: RecoveryNotice) {
+    return {
+      agentId: agent.id,
       noticeKind: notice.kind,
       goalId: notice.ref.id,
       goalRevision: notice.ref.revision,
       roundsStarted: notice.roundsStarted,
       maxGoalRounds: notice.maxGoalRounds,
-      ...safeError(error),
     };
-    if (event === "goal-recovery/question-failed" && entry.errorCode === "ASK_ABORTED") {
+  }
+
+  function logFailure(event: string, agent: Agent, notice: RecoveryNotice, error: unknown): void {
+    const entry = { event, ...noticeEntry(agent, notice), ...safeError(error) };
+    if (event === "goal-recovery/notice-failed" && entry.errorCode === "ASK_ABORTED") {
       logger.debug(entry);
     } else {
       logger.warn(entry);
@@ -61,7 +66,7 @@ export function apply(ctx: Context): void {
     try {
       notice = classifyRecovery(ctx.goals.get(agent), latestTurnEnd(agent.session.events));
     } catch (error) {
-      logger.warn({ event: "goal-recovery/inspection-failed", ...safeError(error) });
+      logger.warn({ event: "goal-recovery/inspection-failed", agentId: agent.id, ...safeError(error) });
       return;
     }
     if (!notice) return;
@@ -75,21 +80,42 @@ export function apply(ctx: Context): void {
     const pending = { key, controller };
     pendingByAgent.set(agent, pending);
     controllers.add(controller);
+    logger.info({ event: "goal-recovery/notice-opened", ...noticeEntry(agent, notice) });
 
     try {
       let answer: unknown;
       try {
         answer = await ctx.userQuestions.ask(recoveryQuestion(notice, agent, controller.signal));
       } catch (error) {
-        logFailure("goal-recovery/question-failed", notice, error);
+        logFailure("goal-recovery/notice-failed", agent, notice, error);
         return;
       }
 
-      if (controller.signal.aborted || !choseResume(answer) || notice.kind !== "resume-required") return;
+      if (controller.signal.aborted) return;
+      if (!isRecoveryAnswer(answer)) {
+        logFailure(
+          "goal-recovery/notice-failed",
+          agent,
+          notice,
+          Object.assign(new Error("Goal recovery question returned a malformed answer"), {
+            code: "MALFORMED_ANSWER",
+          }),
+        );
+        return;
+      }
+      if (notice.kind === "round-limit") {
+        logger.info({ event: "goal-recovery/round-limit-acknowledged", ...noticeEntry(agent, notice) });
+        return;
+      }
+      if (!choseResume(answer)) {
+        logger.info({ event: "goal-recovery/left-paused", ...noticeEntry(agent, notice) });
+        return;
+      }
       try {
         ctx.goals.resume(agent, notice.ref);
+        logger.info({ event: "goal-recovery/resumed", ...noticeEntry(agent, notice) });
       } catch (error) {
-        logFailure("goal-recovery/resume-failed", notice, error);
+        logFailure("goal-recovery/resume-failed", agent, notice, error);
       }
     } finally {
       const current = pendingByAgent.get(agent);
