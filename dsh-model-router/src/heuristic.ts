@@ -61,6 +61,8 @@ export function classifyHeuristic(
   context?: HeuristicContext,
 ): Complexity {
   const text = message.toLowerCase().trim();
+  const invokesSkill = /^(?:\/|\$)[a-z0-9][\w:-]*(?:\s|$)/i.test(text);
+  const requestsEscalation = /\bescalat(?:e|es|ed|ing|ion)\b/i.test(text);
   let score = 0;
 
   // 1. Length
@@ -104,9 +106,16 @@ export function classifyHeuristic(
   if (context?.hasFiles) score += 1;
 
   // 7. Trivial short requests
-  if (wordCount < 8 && !text.includes("?") && fileMentions === 0) {
+  if (
+    !invokesSkill &&
+    wordCount < 8 &&
+    !text.includes("?") &&
+    fileMentions === 0
+  ) {
     score -= 2;
   }
+
+  if (requestsEscalation) score = Math.max(score, 3);
 
   if (score <= 2) return "simple";
   if (score <= 5) return "medium";

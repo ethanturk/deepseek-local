@@ -301,7 +301,13 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
         chunk?.type === "finish" &&
         (chunk.reason?.kind === "error" || chunk.reason?.kind === "aborted")
       ) {
-        throw new Error(`LLM stream finished with ${chunk.reason.kind}`);
+        const details = [
+          chunk.reason.failure?.code,
+          chunk.reason.failure?.message,
+        ].filter(Boolean);
+        throw new Error(
+          `LLM stream finished with ${chunk.reason.kind}${details.length ? `: ${details.join(": ")}` : ""}`,
+        );
       }
     }
     return text.trim();

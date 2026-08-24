@@ -362,6 +362,39 @@ test("non-string model text deltas cannot break classifier routing", async () =>
   assert.equal(handlers.modelRouter.getState(agent.id)?.currentTierId, "smart");
 });
 
+test("classifier warnings preserve provider finish error details", async () => {
+  const handlers = createHarness({
+    stream: async function* (options) {
+      if (modelPrompt(options)) {
+        yield {
+          type: "finish",
+          reason: {
+            kind: "error",
+            failure: {
+              code: "token_expired",
+              message: "Provided authentication token is expired.",
+            },
+          },
+        };
+      }
+    },
+  });
+  const message = { role: "user", content: "Hello", source: { kind: "user" } };
+  const agent = { id: "classifier-error-agent", session: { deriveMessages: () => [message] } };
+  const warnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args);
+  try {
+    await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  const warningText = warnings.flat().map(String).join(" ");
+  assert.match(warningText, /token_expired/);
+  assert.match(warningText, /Provided authentication token is expired\./);
+});
+
 test("router diagnostics use stderr rather than the protocol stdout channel", () => {
   const handlers = createHarness({});
   const originalLog = console.log;
