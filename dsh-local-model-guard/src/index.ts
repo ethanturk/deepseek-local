@@ -97,6 +97,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       s = {
         consecutiveFailures: 0,
         recentSignatures: [],
+        askCallsThisStep: 0,
         recentToolFailures: 0,
       };
       state.set(agentId, s);
@@ -221,6 +222,38 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   ctx.on("tools/post-execute" as any, async (exec: any, result: any, next: any) => {
     try {
       if (result && typeof result === "object") {
+        const agentId = exec?.agentId ?? result?.agentId ?? "default";
+        const toolName = String(
+          exec?.name ?? exec?.toolName ?? exec?.tool?.name ?? "",
+        );
+        const failure = result?.error ?? result?.failure;
+        const failureCode = String(failure?.code ?? result?.code ?? "");
+
+        if (toolName === "ask_user_question" && failureCode === "ASK_ABORTED") {
+          return await next();
+        }
+
+        if (
+          toolName === "ask_user_question" &&
+          failureCode === "INVALID_ARGS" &&
+          shouldEnforce(agentId)
+        ) {
+          const message = String(
+            failure?.message ?? result?.message ?? "invalid ask arguments",
+          );
+          const reason = `ASK_USER_QUESTION_INVALID_ARGS: ${message}`;
+          const tierId = (ctx as any).modelRouter?.escalateTier?.(
+            agentId,
+            reason,
+            exec?.signal ?? result?.signal,
+          );
+          if (tierId) {
+            getOrCreate(agentId).pendingAskRetry =
+              "Ask the user once on this higher tier. Use one ask_user_question call with a valid questions array; do not send todo arguments or a second ask call.";
+            emitGuardEvent(agentId, "ask-failure-escalate", { tierId, reason });
+          }
+        }
+
         const subagentFailure = isOpaqueSubagentFailure(exec, result);
         if (subagentFailure && shouldEnforce(subagentFailure.agentId)) {
           const tierId = (ctx as any).modelRouter?.escalateTier?.(
@@ -257,35 +290,61 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     }
   });
 
-  // ---------- Optional light retries on tools/execute ----------
-  if (config.enableRetries && config.maxRetries > 0) {
-    ctx.on("tools/execute" as any, async (exec: any, next: any) => {
-      const agentId = exec?.agentId ?? exec?.agent?.id ?? "default";
-      if (!shouldEnforce(agentId)) {
-        return next?.();
-      }
+  // ---------- Guard asks and optionally retry transient tool failures ----------
+  ctx.on("tools/execute" as any, async (exec: any, next: any) => {
+    const agentId = exec?.agentId ?? exec?.agent?.id ?? "default";
+    if (!shouldEnforce(agentId)) {
+      return next?.();
+    }
 
-      let lastErr: unknown;
-      const attempts = 1 + config.maxRetries;
-      for (let i = 0; i < attempts; i++) {
-        try {
-          return await next?.();
-        } catch (err) {
-          lastErr = err;
-          const msg = String((err as any)?.message ?? err);
-          // Only retry likely-transient failures
-          const transient =
-            /timeout|econnreset|socket|temporarily|rate limit|503|502/i.test(
-              msg,
-            );
-          if (!transient || i === attempts - 1) throw err;
-          // brief backoff
-          await new Promise((r) => setTimeout(r, 150 * (i + 1)));
+    const toolName = String(
+      exec?.name ?? exec?.toolName ?? exec?.tool?.name ?? "",
+    );
+    if (toolName === "ask_user_question") {
+      const s = getOrCreate(agentId);
+      if (s.askCallsThisStep >= 1) {
+        const reason = "DUPLICATE_ASK_USER_QUESTION";
+        const tierId = (ctx as any).modelRouter?.escalateTier?.(
+          agentId,
+          reason,
+          exec?.signal,
+        );
+        if (tierId) {
+          s.pendingAskRetry =
+            "Ask the user once on this higher tier. Use one ask_user_question call with a valid questions array; do not send todo arguments or a second ask call.";
         }
+        emitGuardEvent(agentId, "duplicate-ask-blocked", { tierId, reason });
+        throw new Error(
+          "Only one ask_user_question call is allowed per model step",
+        );
       }
-      throw lastErr;
-    });
-  }
+      s.askCallsThisStep += 1;
+    }
+
+    if (!config.enableRetries || config.maxRetries <= 0) {
+      return next?.();
+    }
+
+    let lastErr: unknown;
+    const attempts = 1 + config.maxRetries;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await next?.();
+      } catch (err) {
+        lastErr = err;
+        const msg = String((err as any)?.message ?? err);
+        // Only retry likely-transient failures
+        const transient =
+          /timeout|econnreset|socket|temporarily|rate limit|503|502/i.test(
+            msg,
+          );
+        if (!transient || i === attempts - 1) throw err;
+        // brief backoff
+        await new Promise((r) => setTimeout(r, 150 * (i + 1)));
+      }
+    }
+    throw lastErr;
+  });
 
   // ---------- Recover model request failures ----------
   ctx.on("agent/request-error" as any, async (payload: any, next: any) => {
@@ -334,7 +393,12 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       }
 
       const s = getOrCreate(agentId);
-      if (s.pendingSubagentRetry) {
+      s.askCallsThisStep = 0;
+      if (s.pendingAskRetry) {
+        recoveryReason = s.pendingAskRetry;
+        s.pendingAskRetry = undefined;
+        emitGuardEvent(agentId, "ask-retry-injected", {});
+      } else if (s.pendingSubagentRetry) {
         recoveryReason = s.pendingSubagentRetry;
         s.pendingSubagentRetry = undefined;
         emitGuardEvent(agentId, "subagent-retry-injected", {});
@@ -387,6 +451,39 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       if (!shouldEnforce(agentId)) return;
 
       const s = getOrCreate(agentId);
+      const messages = turn?.agent?.session?.deriveMessages?.();
+      const lastAssistant = Array.isArray(messages)
+        ? messages.findLast((message: any) => message?.role === "assistant")
+        : undefined;
+      const content = lastAssistant?.content;
+      const hasVisibleText = typeof content === "string"
+        ? Boolean(content.trim())
+        : Array.isArray(content) && content.some((block: any) =>
+          block?.type === "text" && String(block.text ?? "").trim()
+        );
+      const hasToolCall = Array.isArray(content) &&
+        content.some((block: any) => block?.type === "tool-call");
+      if (
+        lastAssistant &&
+        !hasVisibleText &&
+        !hasToolCall &&
+        !s.emptyResponseRecoveryAttempted &&
+        typeof turn?.agent?.steer === "function"
+      ) {
+        const reason = "EMPTY_ASSISTANT_RESPONSE";
+        const tierId = (ctx as any).modelRouter?.escalateTier?.(
+          agentId,
+          reason,
+          turn?.signal,
+        );
+        if (tierId) {
+          s.emptyResponseRecoveryAttempted = true;
+          turn.agent.steer(createRecoveryMessage(
+            "Previous response contained no visible answer. Provide a concise visible answer now without repeating completed tool work.",
+          ));
+          emitGuardEvent(agentId, "empty-response-escalate", { tierId });
+        }
+      }
       if (
         s.consecutiveFailures >= config.maxConsecutiveFailures * 2 ||
         hasRepeatedSignature(s.recentSignatures, config.maxRepeatedCalls + 1)
@@ -407,6 +504,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       const agentId = turn?.agentId ?? turn?.agent?.id ?? "default";
       const s = state.get(agentId);
       if (!s) return;
+      s.emptyResponseRecoveryAttempted = false;
       // Decay recent failure counter each turn
       s.recentToolFailures = Math.max(0, s.recentToolFailures - 1);
     } catch {

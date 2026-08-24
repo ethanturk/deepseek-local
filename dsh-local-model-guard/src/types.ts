@@ -36,7 +36,13 @@ export interface LocalGuardConfig {
 export interface GuardState {
   consecutiveFailures: number;
   recentSignatures: string[];
+  /** Number of ask_user_question calls attempted in the current model step. */
+  askCallsThisStep: number;
   lastInterventionAt?: number;
+  /** One corrected ask instruction after invalid or duplicate ask calls. */
+  pendingAskRetry?: string;
+  /** Prevent repeated empty-response recovery within one turn. */
+  emptyResponseRecoveryAttempted?: boolean;
   /** One controlled retry instruction after an opaque subagent runtime failure. */
   pendingSubagentRetry?: string;
   /** Optional recent tool failure count for heuristic context. */
