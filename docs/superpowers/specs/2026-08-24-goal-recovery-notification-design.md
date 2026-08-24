@@ -38,7 +38,7 @@ Version 1 does not:
 
 Create a standalone host-only Cordis plugin named `dsh-goal-recovery`. It depends on the public DSH agent, goal, session, and user-question services. No client package is needed because `ctx.userQuestions.ask()` already routes a native, session-scoped question to the active DSH UI provider and waits without model inference.
 
-The plugin listens at `agent/session-start`, after persisted session repair and goal replay have produced the live agent state. It defers classification by one microtask so all session-start listeners, including the goal service's disarm policy, settle before it reads the goal. It then classifies the current goal and latest terminal turn and starts at most one asynchronous recovery prompt for that agent runtime. The event listener does not await the human response and therefore does not block session publication.
+The plugin listens at `agent/session-start`, after persisted session repair and goal replay have produced the live agent state, and at `goal/changed`, after a live goal mutation commits. It defers classification by one microtask so session-start listeners, including the goal service's disarm policy, settle before it reads the goal, and so event publication is never blocked on a human response. This catches both reopened goals and round-limit transitions while DSH remains open. It then classifies the current goal and latest terminal turn and starts at most one asynchronous recovery prompt for that agent runtime.
 
 When the user chooses `Resume goal`, the plugin calls `ctx.goals.resume(agent, originalGoalRef)`. The goal service supplies the compare-and-set fence, validates remaining round capacity, and arms continuation. Any stale revision or invalid transition is reported without substituting a newer goal ref or retrying automatically.
 
@@ -155,6 +155,7 @@ Required automated coverage:
 - Active, disarmed goal with exhausted capacity also returns `round-limit`.
 - Armed, paused, complete, absent, and unrelated blocked goals produce no notice.
 - One agent runtime opens only one matching question.
+- A live `goal/changed` round-limit transition opens the acknowledgment without waiting for another session start.
 - `Resume goal` calls `ctx.goals.resume()` once with the captured agent and exact goal ref.
 - `Leave paused`, custom text, and empty selection perform no goal mutation.
 - Round-limit acknowledgment performs no goal mutation.

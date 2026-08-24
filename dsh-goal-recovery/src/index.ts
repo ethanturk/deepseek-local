@@ -104,6 +104,10 @@ export function apply(ctx: Context): void {
     queueMicrotask(() => { void inspectAndPrompt(agent); });
   });
 
+  ctx.on("goal/changed", ({ agent }) => {
+    queueMicrotask(() => { void inspectAndPrompt(agent); });
+  });
+
   ctx.on("agent/disposed", ({ agent }) => {
     disposedAgents.add(agent);
     pendingByAgent.get(agent)?.controller.abort();

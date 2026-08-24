@@ -363,13 +363,30 @@ test("allows a later session resume when the terminal turn sequence changes", as
   await flush();
 });
 
+test("opens the round-limit notice when the live goal reaches its cap", async () => {
+  const harness = makeContext({ goal: makeGoal(4, {
+    phase: "blocked",
+    roundsStarted: 4,
+    maxGoalRounds: 4,
+    blockedReason: { code: "round-limit", message: "Goal stopped after 4 rounds" },
+  }) });
+  const agent = makeAgent();
+
+  harness.emit("goal/changed", agent);
+  await flush();
+
+  assert.equal(harness.asks.length, 1);
+  assert.equal(harness.asks[0]!.questions[0]!.header, "Goal round limit");
+  assert.equal(harness.asks[0]!.questions[0]!.question, "Goal stopped after 4/4 rounds.");
+});
+
 test("makes zero model calls and registers no model hooks", async () => {
   const harness = makeContext();
   harness.emit("agent/session-start", makeAgent());
   await flush();
 
   assert.equal(harness.modelReads, 0);
-  assert.deepEqual(harness.registeredEvents, ["agent/session-start", "agent/disposed"]);
+  assert.deepEqual(harness.registeredEvents, ["agent/session-start", "goal/changed", "agent/disposed"]);
 });
 
 test("logs ASK_ABORTED structurally below warning level", async () => {

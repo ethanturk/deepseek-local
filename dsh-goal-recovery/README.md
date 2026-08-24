@@ -1,11 +1,12 @@
 # dsh-goal-recovery
 
-Native DSH session-restart notifications for goals needing explicit recovery.
+Native DSH notifications for goals needing explicit recovery.
 
 ## Notices
 
-After `agent/session-start` listeners finish, plugin inspects persisted goal
-state. It shows native question in exactly two cases:
+After `agent/session-start` listeners finish, and whenever `goal/changed`
+commits a new live goal state, plugin inspects persisted goal state. It shows
+a native question in exactly two cases:
 
 1. **Resume required:** goal is active, disarmed, and below configured round
    limit. This covers a reopened session whose goal remains active and goals

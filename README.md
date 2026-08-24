@@ -5,7 +5,7 @@ DeepSeek Harness plugins for **local-first** agent workflows:
 1. **`dsh-model-router`** — tiered routing (fast → medium → smart) with classification, post-turn validation, escalation, per-tier `reasoningEffort`, and automatic fallback when effort is rejected by a provider.
 2. **`dsh-local-model-guard`** — strict monitoring for failed tool calls and loops on flaky local/small models; only enforces when the router marks `enableLocalGuardrails: true` for the current tier.
 3. **`dsh-openai-gateway`** — an authenticated OpenAI-compatible Chat Completions endpoint backed by the tiered router, including client-owned function calls and optional access to installed DSH tools.
-4. **`dsh-goal-recovery`** — native session-restart notification when a goal needs explicit resume or has hit its round cap.
+4. **`dsh-goal-recovery`** — native lifecycle notification when a goal needs explicit resume or has hit its round cap.
 
 Inspired by NVIDIA NeMo Switchyard-style routing, implemented as native Cordis plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (developer preview).
 
@@ -33,8 +33,9 @@ pnpm dsh web --patch /absolute/path/to/deepseek-local/dsh-combined-patch.yml
 5. Configure providers/models for the three tiers to match accounts you have.
 6. To use the gateway, set `DSH_OPENAI_API_KEY` in the DSH process environment and call `http://127.0.0.1:3080/v1` with model `auto-tier`.
 
-On session restart, `dsh-goal-recovery` asks a native question when a goal
-needs explicit resume or has hit its configured round cap.
+On session restart or a live round-cap transition, `dsh-goal-recovery` asks a
+native question when a goal needs explicit resume or has hit its configured
+round cap.
 
 ## Defaults (summary)
 
