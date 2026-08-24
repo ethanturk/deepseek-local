@@ -25,10 +25,10 @@ function goal(overrides: Partial<GoalView> = {}): GoalView {
   };
 }
 
-function turnEnd(reason: "completed" | "interrupted" | "error"): SessionEvent<"turn/end"> {
+function turnEnd(reason: "completed" | "interrupted" | "error", seq = 1): SessionEvent<"turn/end"> {
   return {
     type: "turn/end",
-    seq: 1,
+    seq,
     time: 1,
     data: reason === "error"
       ? { turn: 1, reason: { kind: "error", error: { message: "boom", code: "E" } } }
@@ -84,12 +84,21 @@ for (const phase of ["absent", "armed", "paused", "complete", "unrelated-blocked
   });
 }
 
-test("notice key changes with goal revision and notice kind, not event objects", () => {
+test("notice key changes with goal revision, notice kind, and terminal turn sequence", () => {
   const notice = classifyRecovery(goal(), turnEnd("completed"));
   const revised = classifyRecovery(goal({ revision: 4 }), turnEnd("completed"));
   const interrupted = classifyRecovery(goal(), turnEnd("interrupted"));
-  assert.ok(notice && revised && interrupted);
+  const laterTerminal = classifyRecovery(goal(), turnEnd("completed", 9));
+  assert.ok(notice && revised && interrupted && laterTerminal);
   assert.notEqual(recoveryNoticeKey(notice), recoveryNoticeKey(revised));
   assert.notEqual(recoveryNoticeKey(notice), recoveryNoticeKey({ ...notice, kind: "round-limit", maxGoalRounds: 8 }));
+  assert.notEqual(recoveryNoticeKey(notice), recoveryNoticeKey(laterTerminal));
   assert.equal(recoveryNoticeKey(notice), recoveryNoticeKey(classifyRecovery(goal(), turnEnd("error"))!));
+});
+
+test("notice key remains stable when no terminal turn sequence exists", () => {
+  const first = classifyRecovery(goal(), undefined);
+  const second = classifyRecovery(goal(), undefined);
+  assert.ok(first && second);
+  assert.equal(recoveryNoticeKey(first), recoveryNoticeKey(second));
 });

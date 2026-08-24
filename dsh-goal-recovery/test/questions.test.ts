@@ -29,8 +29,8 @@ test("renders interrupted resume request with native question fields", () => {
     questions: [{
       id: "goal-recovery",
       header: "Goal paused",
-      question: "Resume the paused goal?",
-      detail: "The previous turn stopped unexpectedly after 2/8 rounds started.",
+      question: "This goal cannot continue automatically. What should DSH do?",
+      detail: "The previous turn was interrupted before completion. DSH preserved the goal and requires your approval before continuing.",
       options: [{ label: "Resume goal" }, { label: "Leave paused" }],
       multiSelect: false,
     }],
@@ -44,8 +44,8 @@ test("renders ordinary resume request with reopened-session detail", () => {
     questions: [{
       id: "goal-recovery",
       header: "Goal paused",
-      question: "Resume the paused goal?",
-      detail: "The session reopened with the goal paused after 2/8 rounds started.",
+      question: "This goal cannot continue automatically. What should DSH do?",
+      detail: "DSH preserved the active goal but disabled automatic continuation when the session resumed.",
       options: [{ label: "Resume goal" }, { label: "Leave paused" }],
       multiSelect: false,
     }],
@@ -59,8 +59,8 @@ test("renders round-limit request with acknowledgement only", () => {
     questions: [{
       id: "goal-recovery",
       header: "Goal stopped",
-      question: "What would you like to do?",
-      detail: "The goal used 8/8 rounds. Increase the configured limit before resuming.",
+      question: "Goal stopped after 8/8 rounds.",
+      detail: "Increase the goal's maxGoalRounds before resuming if more work is authorized.",
       options: [{ label: "Acknowledge" }],
       multiSelect: false,
     }],

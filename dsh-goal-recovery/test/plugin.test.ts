@@ -134,7 +134,10 @@ test("defers inspection until after session-start listeners finish", async () =>
   await flush();
 
   assert.equal(harness.asks.length, 1);
-  assert.match(harness.asks[0]!.questions[0]!.detail!, /2\/8/);
+  assert.equal(
+    harness.asks[0]!.questions[0]!.detail,
+    "DSH preserved the active goal but disabled automatic continuation when the session resumed.",
+  );
 });
 
 test("asks once for one exact agent and goal revision", async () => {
@@ -331,6 +334,31 @@ test("allows a new question when the goal revision changes", async () => {
   await flush();
   assert.equal(harness.asks.length, 2);
 
+  gates[1]!.resolve(answer("Leave paused"));
+  await flush();
+});
+
+test("allows a later session resume when the terminal turn sequence changes", async () => {
+  const gates = [deferred<unknown>(), deferred<unknown>()];
+  const harness = makeContext({ ask: () => gates[harness.asks.length - 1]!.promise });
+  const agent = makeAgent();
+  const events = agent.session.events as unknown as Array<{
+    type: "turn/end";
+    seq: number;
+    time: number;
+    data: { turn: number; reason: { kind: "completed" } };
+  }>;
+  events.push({ type: "turn/end", seq: 3, time: 1, data: { turn: 1, reason: { kind: "completed" } } });
+
+  harness.emit("agent/session-start", agent);
+  await flush();
+  events.push({ type: "turn/end", seq: 7, time: 2, data: { turn: 2, reason: { kind: "completed" } } });
+  harness.emit("agent/session-start", agent);
+  await flush();
+
+  assert.equal(harness.asks.length, 2);
+  assert.equal(harness.asks[0]!.signal!.aborted, true);
+  gates[0]!.resolve(answer("Leave paused"));
   gates[1]!.resolve(answer("Leave paused"));
   await flush();
 });
