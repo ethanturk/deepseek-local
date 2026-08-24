@@ -34,10 +34,12 @@ function safeError(error: unknown): { errorCode: string; errorMessage: string } 
 export function apply(ctx: Context): void {
   const logger = ctx.logger(name);
   const pendingByAgent = new WeakMap<Agent, PendingRecovery>();
+  const disposedAgents = new WeakSet<Agent>();
   const controllers = new Set<AbortController>();
+  let closed = false;
 
   function logFailure(event: string, notice: RecoveryNotice, error: unknown): void {
-    logger.warn({
+    const entry = {
       event,
       noticeKind: notice.kind,
       goalId: notice.ref.id,
@@ -45,10 +47,16 @@ export function apply(ctx: Context): void {
       roundsStarted: notice.roundsStarted,
       maxGoalRounds: notice.maxGoalRounds,
       ...safeError(error),
-    });
+    };
+    if (event === "goal-recovery/question-failed" && entry.errorCode === "ASK_ABORTED") {
+      logger.debug(entry);
+    } else {
+      logger.warn(entry);
+    }
   }
 
   async function inspectAndPrompt(agent: Agent): Promise<void> {
+    if (closed || disposedAgents.has(agent)) return;
     let notice: RecoveryNotice | undefined;
     try {
       notice = classifyRecovery(ctx.goals.get(agent), latestTurnEnd(agent.session.events));
@@ -59,7 +67,9 @@ export function apply(ctx: Context): void {
     if (!notice) return;
 
     const key = recoveryNoticeKey(notice);
-    if (pendingByAgent.get(agent)?.key === key) return;
+    const previous = pendingByAgent.get(agent);
+    if (previous?.key === key) return;
+    previous?.controller.abort();
 
     const controller = new AbortController();
     const pending = { key, controller };
@@ -75,7 +85,7 @@ export function apply(ctx: Context): void {
         return;
       }
 
-      if (!choseResume(answer) || notice.kind !== "resume-required") return;
+      if (controller.signal.aborted || !choseResume(answer) || notice.kind !== "resume-required") return;
       try {
         ctx.goals.resume(agent, notice.ref);
       } catch (error) {
@@ -95,11 +105,13 @@ export function apply(ctx: Context): void {
   });
 
   ctx.on("agent/disposed", ({ agent }) => {
+    disposedAgents.add(agent);
     pendingByAgent.get(agent)?.controller.abort();
     pendingByAgent.delete(agent);
   });
 
   ctx.effect(() => () => {
+    closed = true;
     for (const controller of controllers) controller.abort();
     controllers.clear();
   });

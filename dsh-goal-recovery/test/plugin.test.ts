@@ -50,14 +50,18 @@ function makeContext(options: {
   const asks: AskUserQuestionRequest[] = [];
   const resumes: Array<{ agent: Agent; ref: GoalRef }> = [];
   const logs: unknown[] = [];
+  const logLevels: string[] = [];
   const registeredEvents: string[] = [];
   let goal = options.goal ?? makeGoal();
+  let goalReads = 0;
   let modelReads = 0;
 
-  const logger = Object.assign(
-    () => ({ warn: (entry: unknown) => logs.push(entry) }),
-    { warn: (entry: unknown) => logs.push(entry) },
-  );
+  const record = (level: string) => (entry: unknown) => {
+    logLevels.push(level);
+    logs.push(entry);
+  };
+  const namedLogger = { debug: record("debug"), info: record("info"), warn: record("warn") };
+  const logger = Object.assign(() => namedLogger, namedLogger);
   const ctx = {
     on(event: string, listener: Listener) {
       registeredEvents.push(event);
@@ -69,7 +73,10 @@ function makeContext(options: {
       return () => Promise.resolve();
     },
     goals: {
-      get: () => goal,
+      get: () => {
+        goalReads += 1;
+        return goal;
+      },
       resume: (agent: Agent, ref: GoalRef) => {
         resumes.push({ agent, ref });
         return options.resume?.(agent, ref);
@@ -95,8 +102,10 @@ function makeContext(options: {
     cleanups,
     ctx,
     logs,
+    logLevels,
     registeredEvents,
     resumes,
+    get goalReads() { return goalReads; },
     get modelReads() { return modelReads; },
     setGoal(value: GoalView) { goal = value; },
     emit(event: string, agent: Agent) {
@@ -185,7 +194,7 @@ test("does not resume after Leave paused or Acknowledge", async () => {
 test("does not retry with a fresh ref when resume rejects stale revision", async () => {
   const harness = makeContext({
     ask: async () => answer("Resume goal"),
-    resume: () => { throw Object.assign(new Error("revision is stale"), { code: "STALE_REVISION" }); },
+    resume: () => { throw Object.assign(new Error("revision is stale"), { code: "GOAL_STALE_REVISION" }); },
   });
   const agent = makeAgent();
 
@@ -201,12 +210,57 @@ test("does not retry with a fresh ref when resume rejects stale revision", async
     goalRevision: 3,
     roundsStarted: 2,
     maxGoalRounds: 8,
-    errorCode: "STALE_REVISION",
+    errorCode: "GOAL_STALE_REVISION",
     errorMessage: "revision is stale",
   }]);
 });
 
-test("aborts and clears pending question when agent is disposed", async () => {
+test("fails closed without retry when resume rejects an invalid transition", async () => {
+  const harness = makeContext({
+    ask: async () => answer("Resume goal"),
+    resume: () => { throw Object.assign(new Error("goal cannot resume"), { code: "GOAL_INVALID_TRANSITION" }); },
+  });
+
+  harness.emit("agent/session-start", makeAgent());
+  await flush();
+
+  assert.equal(harness.resumes.length, 1);
+  assert.deepEqual(harness.logs, [{
+    event: "goal-recovery/resume-failed",
+    noticeKind: "resume-required",
+    goalId: "goal-1",
+    goalRevision: 3,
+    roundsStarted: 2,
+    maxGoalRounds: 8,
+    errorCode: "GOAL_INVALID_TRANSITION",
+    errorMessage: "goal cannot resume",
+  }]);
+});
+
+test("does not inspect when the agent is disposed in the session-start tick", async () => {
+  const harness = makeContext();
+  const agent = makeAgent();
+
+  harness.emit("agent/session-start", agent);
+  harness.emit("agent/disposed", agent);
+  await flush();
+
+  assert.equal(harness.goalReads, 0);
+  assert.equal(harness.asks.length, 0);
+});
+
+test("does not inspect when the plugin is disposed in the session-start tick", async () => {
+  const harness = makeContext();
+
+  harness.emit("agent/session-start", makeAgent());
+  harness.cleanups[0]!();
+  await flush();
+
+  assert.equal(harness.goalReads, 0);
+  assert.equal(harness.asks.length, 0);
+});
+
+test("aborts pending question and ignores the disposed agent", async () => {
   const asks: AskUserQuestionRequest[] = [];
   const harness = makeContext({ ask: (request) => {
     asks.push(request);
@@ -224,9 +278,21 @@ test("aborts and clears pending question when agent is disposed", async () => {
 
   harness.emit("agent/session-start", agent);
   await flush();
-  assert.equal(asks.length, 2);
-  harness.emit("agent/disposed", agent);
+  assert.equal(asks.length, 1);
+});
+
+test("does not resume when an aborted question later resolves Resume goal", async () => {
+  const gate = deferred<unknown>();
+  const harness = makeContext({ ask: () => gate.promise });
+  const agent = makeAgent();
+
+  harness.emit("agent/session-start", agent);
   await flush();
+  harness.emit("agent/disposed", agent);
+  gate.resolve(answer("Resume goal"));
+  await flush();
+
+  assert.equal(harness.resumes.length, 0);
 });
 
 test("aborts every pending question when plugin scope is disposed", async () => {
@@ -245,8 +311,8 @@ test("aborts every pending question when plugin scope is disposed", async () => 
 });
 
 test("allows a new question when the goal revision changes", async () => {
-  const gate = deferred<unknown>();
-  const harness = makeContext({ ask: () => gate.promise });
+  const gates = [deferred<unknown>(), deferred<unknown>()];
+  const harness = makeContext({ ask: () => gates[harness.asks.length - 1]!.promise });
   const agent = makeAgent();
 
   harness.emit("agent/session-start", agent);
@@ -257,7 +323,15 @@ test("allows a new question when the goal revision changes", async () => {
 
   assert.equal(harness.asks.length, 2);
   assert.notEqual(harness.asks[0]!.signal, harness.asks[1]!.signal);
-  gate.resolve(answer("Leave paused"));
+  assert.equal(harness.asks[0]!.signal!.aborted, true);
+
+  gates[0]!.resolve(answer("Leave paused"));
+  await flush();
+  harness.emit("agent/session-start", agent);
+  await flush();
+  assert.equal(harness.asks.length, 2);
+
+  gates[1]!.resolve(answer("Leave paused"));
   await flush();
 });
 
@@ -270,8 +344,30 @@ test("makes zero model calls and registers no model hooks", async () => {
   assert.deepEqual(harness.registeredEvents, ["agent/session-start", "agent/disposed"]);
 });
 
-for (const code of ["ASK_ABORTED", "CALLER_NOT_LIVE", "DELEGATED_CALLER", "NO_PROVIDER"]) {
-  test(`logs ${code} structurally without resuming or rejecting detached work`, async () => {
+test("logs ASK_ABORTED structurally below warning level", async () => {
+  const harness = makeContext({ ask: async () => {
+    throw Object.assign(new Error("safe ASK_ABORTED"), { code: "ASK_ABORTED", secret: "must not log" });
+  } });
+
+  harness.emit("agent/session-start", makeAgent());
+  await flush();
+
+  assert.equal(harness.resumes.length, 0);
+  assert.deepEqual(harness.logLevels, ["debug"]);
+  assert.deepEqual(harness.logs, [{
+    event: "goal-recovery/question-failed",
+    noticeKind: "resume-required",
+    goalId: "goal-1",
+    goalRevision: 3,
+    roundsStarted: 2,
+    maxGoalRounds: 8,
+    errorCode: "ASK_ABORTED",
+    errorMessage: "safe ASK_ABORTED",
+  }]);
+});
+
+for (const code of ["CALLER_NOT_LIVE", "DELEGATED_CALLER", "NO_PROVIDER"]) {
+  test(`warns for ${code} structurally without resuming or rejecting detached work`, async () => {
     const harness = makeContext({ ask: async () => {
       throw Object.assign(new Error(`safe ${code}`), { code, secret: "must not log" });
     } });
@@ -280,6 +376,7 @@ for (const code of ["ASK_ABORTED", "CALLER_NOT_LIVE", "DELEGATED_CALLER", "NO_PR
     await flush();
 
     assert.equal(harness.resumes.length, 0);
+    assert.deepEqual(harness.logLevels, ["warn"]);
     assert.deepEqual(harness.logs, [{
       event: "goal-recovery/question-failed",
       noticeKind: "resume-required",
