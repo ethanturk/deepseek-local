@@ -29,3 +29,10 @@
 ## Concerns
 
 - None known. Wording is intentionally limited to recovery state and round counts; objective remains excluded.
+
+## Round 1 Fix
+
+- Added regression coverage proving custom text `"Resume goal"` with an empty `selected` array does not select resume and does not throw.
+- Focused command: `node --test dsh-goal-recovery/test/questions.test.ts` — 5 passed, 0 failed.
+- Package command: `npm test` — 16 passed, 0 failed.
+- Type command: `npm run typecheck` — exit 0.

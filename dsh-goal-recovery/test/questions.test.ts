@@ -87,6 +87,7 @@ test("choseResume safely rejects malformed and non-resume answers", () => {
     { answers: [{ id: "goal-recovery", selected: [] }] },
     { answers: [{ id: "goal-recovery", selected: ["Leave paused"] }] },
     { answers: [{ id: "goal-recovery", selected: ["Acknowledge"] }] },
+    { answers: [{ id: "goal-recovery", selected: [], custom: "Resume goal" }] },
   ]) {
     assert.doesNotThrow(() => choseResume(answer));
     assert.equal(choseResume(answer), false);
