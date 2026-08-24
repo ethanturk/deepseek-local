@@ -1,4 +1,4 @@
-# Combined patch: model-router + local-model-guard + OpenAI gateway
+# Combined patch: model-router + local-model-guard + OpenAI gateway + goal-recovery
 # After cloning, replace every ABSOLUTE_REPO_ROOT with your clone path.
 #
 # Usage from a deepseek-harness checkout:
@@ -20,3 +20,7 @@
     - id: dsh-openai-gateway
       name: "/ABSOLUTE_REPO_ROOT/dsh-openai-gateway/src/index.ts"
       # Runtime settings live in the openai-gateway section of DSH settings.
+
+    - id: dsh-goal-recovery
+      name: "/ABSOLUTE_REPO_ROOT/dsh-goal-recovery/src/index.ts"
+      # No plugin settings; recovery decisions use persisted goal state.
