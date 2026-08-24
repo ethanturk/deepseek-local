@@ -1,0 +1,5 @@
+# Bundle patch used by DSH plugin installation.
+
+- insert:
+    - id: dsh-openai-gateway
+      name: "dsh-openai-gateway"

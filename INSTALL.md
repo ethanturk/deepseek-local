@@ -1,7 +1,7 @@
 # INSTALL.md — Agent install into an existing DeepSeek Harness
 
 **Audience:** an automated agent (or human following agent-style steps) installing  
-`dsh-model-router` + `dsh-local-model-guard` into a **pre-existing, already-built** DeepSeek Harness checkout.
+`dsh-model-router`, `dsh-local-model-guard`, and `dsh-openai-gateway` into a **pre-existing, already-built** DeepSeek Harness checkout.
 
 **Do not** rebuild Harness unless install verification fails for missing packages.  
 **Do** use absolute paths everywhere. **Do** stop and report if any step fails.
@@ -73,8 +73,10 @@ grep -n "name:" /tmp/dsh-local-combined.patch.yml
 # Both paths must be absolute and point at:
 #   .../dsh-model-router/src/index.ts
 #   .../dsh-local-model-guard/src/index.ts
+#   .../dsh-openai-gateway/src/index.ts
 test -f "$PLUGIN_ROOT/dsh-model-router/src/index.ts"
 test -f "$PLUGIN_ROOT/dsh-local-model-guard/src/index.ts"
+test -f "$PLUGIN_ROOT/dsh-openai-gateway/src/index.ts"
 ```
 
 ### 2.2 Optional: edit in-repo copies
@@ -116,6 +118,30 @@ If the user has no configured local provider, do not invent model IDs or keys.
 
 ## 4. Load plugins into Harness
 
+Before starting DSH, export one or more gateway keys. The values stay in the
+process environment; settings contain only environment-variable names.
+
+```bash
+export DSH_OPENAI_API_KEY='replace-with-a-long-random-secret'
+```
+
+Add this optional section to `~/.dsh/settings.yaml` (defaults are identical):
+
+```yaml
+openai-gateway:
+  model: auto-tier
+  apiKeyEnvs: [DSH_OPENAI_API_KEY]
+  toolPolicy: isolated
+  maxRequestBodyBytes: 4194304
+  requestTimeoutMs: 600000
+  maxConcurrentRequests: 2
+  corsOrigins: []
+```
+
+Use `toolPolicy: permissive` only when API clients should be able to invoke
+installed DSH tools. Client-declared function tools remain client-owned under
+both policies.
+
 From **`HARNESS_ROOT`**:
 
 ```bash
@@ -147,9 +173,10 @@ Expect lines similar to:
 ```text
 [dsh-model-router] loaded – virtual model "Auto (Tiered Router)", tiers: fast → medium → smart
 [dsh-local-model-guard] loaded – maxFailures=2, maxRepeated=2, window=6, ...
+[dsh-openai-gateway] {"requestId":"...",...}
 ```
 
-If either line is missing:
+If either plugin startup line is missing, or `/v1/models` does not authenticate:
 
 1. Confirm absolute paths in the patch resolve (`test -f ...`).  
 2. Confirm TypeScript is loadable (Harness often uses `tsx` / built loader).  
@@ -164,6 +191,8 @@ If either line is missing:
 | Complex architecture / multi-file request | Prefers **medium** or **smart** |
 | Provider rejects `reasoningEffort` | Router disables effort for the agent and retries without it (log / inject) |
 | On **fast** with guardrails on: force repeated identical failing tool calls | Guard injects short recovery message |
+| `GET /v1/models` with a configured Bearer key | Advertises only `auto-tier` |
+| Client function tool request | Returns `finish_reason: tool_calls`; client executes it and submits the tool result in the next request |
 
 Do **not** claim success without at least startup-log verification.
 
@@ -233,7 +262,7 @@ Prefer the user’s existing profile workflow; do not create new profiles unless
 Report success to the user only when:
 
 1. Patch paths are absolute and files exist.  
-2. Harness starts with both plugins logging `loaded`.  
+2. Harness starts with the router and guard logging `loaded`, and the gateway answers authenticated `/v1/models`.
 3. You stated which providers/models the tiers point at (or explicitly warned they still need configuration).  
 4. You gave the exact command to relaunch with the patch.
 
