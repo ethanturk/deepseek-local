@@ -41,25 +41,32 @@ export function recoveryQuestion(
 }
 
 export function choseResume(answer: unknown): boolean {
-  if (!answer || typeof answer !== "object" || !Array.isArray((answer as { answers?: unknown }).answers)) {
-    return false;
-  }
-  return (answer as { answers: unknown[] }).answers.some((item) => {
-    if (!item || typeof item !== "object") return false;
-    const candidate = item as { id?: unknown; selected?: unknown };
-    return candidate.id === QUESTION_ID
-      && Array.isArray(candidate.selected)
-      && candidate.selected.includes("Resume goal");
-  });
+  return recoveryDecision(answer, "resume-required") === "resume";
 }
 
-export function isRecoveryAnswer(answer: unknown): boolean {
+export function recoveryDecision(
+  answer: unknown,
+  kind: RecoveryNotice["kind"],
+): "resume" | "left-paused" | "acknowledged" | "malformed" {
   if (!answer || typeof answer !== "object" || !Array.isArray((answer as { answers?: unknown }).answers)) {
-    return false;
+    return "malformed";
   }
-  return (answer as { answers: unknown[] }).answers.some((item) => {
-    if (!item || typeof item !== "object") return false;
-    const candidate = item as { id?: unknown; selected?: unknown };
-    return candidate.id === QUESTION_ID && Array.isArray(candidate.selected);
+  const item = (answer as { answers: unknown[] }).answers.find((candidate) => {
+    return !!candidate && typeof candidate === "object"
+      && (candidate as { id?: unknown }).id === QUESTION_ID;
   });
+  if (!item) return "malformed";
+  const selected = (item as { selected?: unknown }).selected;
+  if (!Array.isArray(selected)) return "malformed";
+
+  if (kind === "resume-required") {
+    if (selected.length === 0) return "left-paused";
+    if (selected.length !== 1) return "malformed";
+    if (selected[0] === "Resume goal") return "resume";
+    if (selected[0] === "Leave paused") return "left-paused";
+    return "malformed";
+  }
+
+  if (selected.length === 1 && selected[0] === "Acknowledge") return "acknowledged";
+  return "malformed";
 }

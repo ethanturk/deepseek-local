@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { AskUserQuestionRequest } from "@deepseek-ai/dsh-user-questions";
 import type { RecoveryNotice } from "../src/recovery.ts";
-import { choseResume, recoveryQuestion } from "../src/questions.ts";
+import { choseResume, recoveryDecision, recoveryQuestion } from "../src/questions.ts";
 
 const agent = {} as Agent;
 const signal = new AbortController().signal;
@@ -92,4 +92,17 @@ test("choseResume safely rejects malformed and non-resume answers", () => {
     assert.doesNotThrow(() => choseResume(answer));
     assert.equal(choseResume(answer), false);
   }
+});
+
+test("recoveryDecision validates notice-specific option labels", () => {
+  const selected = (label: string) => ({ answers: [{ id: "goal-recovery", selected: [label] }] });
+  const empty = { answers: [{ id: "goal-recovery", selected: [], custom: "anything" }] };
+
+  assert.equal(recoveryDecision(selected("Resume goal"), "resume-required"), "resume");
+  assert.equal(recoveryDecision(selected("Leave paused"), "resume-required"), "left-paused");
+  assert.equal(recoveryDecision(empty, "resume-required"), "left-paused");
+  assert.equal(recoveryDecision(selected("bogus"), "resume-required"), "malformed");
+  assert.equal(recoveryDecision(selected("Acknowledge"), "round-limit"), "acknowledged");
+  assert.equal(recoveryDecision(empty, "round-limit"), "malformed");
+  assert.equal(recoveryDecision(selected("bogus"), "round-limit"), "malformed");
 });

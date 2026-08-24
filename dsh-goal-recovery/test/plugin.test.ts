@@ -382,12 +382,15 @@ test("allows a later session resume when the terminal turn sequence changes", as
 });
 
 test("opens the round-limit notice when the live goal reaches its cap", async () => {
-  const harness = makeContext({ goal: makeGoal(4, {
-    phase: "blocked",
-    roundsStarted: 4,
-    maxGoalRounds: 4,
-    blockedReason: { code: "round-limit", message: "Goal stopped after 4 rounds" },
-  }) });
+  const harness = makeContext({
+    goal: makeGoal(4, {
+      phase: "blocked",
+      roundsStarted: 4,
+      maxGoalRounds: 4,
+      blockedReason: { code: "round-limit", message: "Goal stopped after 4 rounds" },
+    }),
+    ask: async () => answer("Acknowledge"),
+  });
   const agent = makeAgent();
 
   harness.emit("goal/changed", agent);

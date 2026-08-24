@@ -1,6 +1,6 @@
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { Context } from "@deepseek-ai/cordis";
-import { choseResume, isRecoveryAnswer, recoveryQuestion } from "./questions.ts";
+import { recoveryDecision, recoveryQuestion } from "./questions.ts";
 import {
   classifyRecovery,
   latestTurnEnd,
@@ -92,7 +92,8 @@ export function apply(ctx: Context): void {
       }
 
       if (controller.signal.aborted) return;
-      if (!isRecoveryAnswer(answer)) {
+      const decision = recoveryDecision(answer, notice.kind);
+      if (decision === "malformed") {
         logFailure(
           "goal-recovery/notice-failed",
           agent,
@@ -103,11 +104,11 @@ export function apply(ctx: Context): void {
         );
         return;
       }
-      if (notice.kind === "round-limit") {
+      if (decision === "acknowledged") {
         logger.info({ event: "goal-recovery/round-limit-acknowledged", ...noticeEntry(agent, notice) });
         return;
       }
-      if (!choseResume(answer)) {
+      if (decision === "left-paused") {
         logger.info({ event: "goal-recovery/left-paused", ...noticeEntry(agent, notice) });
         return;
       }
