@@ -13,7 +13,7 @@ export function recoveryQuestion(
     return {
       questions: [{
         id: QUESTION_ID,
-        header: "Goal stopped",
+        header: "Goal round limit",
         question: `Goal stopped after ${notice.roundsStarted}/${notice.maxGoalRounds} rounds.`,
         detail: "Increase the goal's maxGoalRounds before resuming if more work is authorized.",
         options: [{ label: "Acknowledge" }],

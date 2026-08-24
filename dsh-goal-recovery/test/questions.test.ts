@@ -58,7 +58,7 @@ test("renders round-limit request with acknowledgement only", () => {
   assert.deepEqual(request({ kind: "round-limit", ref, roundsStarted: 8, maxGoalRounds: 8 }), {
     questions: [{
       id: "goal-recovery",
-      header: "Goal stopped",
+      header: "Goal round limit",
       question: "Goal stopped after 8/8 rounds.",
       detail: "Increase the goal's maxGoalRounds before resuming if more work is authorized.",
       options: [{ label: "Acknowledge" }],
