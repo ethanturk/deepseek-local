@@ -8,8 +8,8 @@ After `agent/session-start` listeners finish, plugin inspects persisted goal
 state. It shows native question in exactly two cases:
 
 1. **Resume required:** goal is active, disarmed, and below configured round
-   limit. This covers reopened paused goals and goals whose latest turn ended
-   with `interrupted: true`.
+   limit. This covers a reopened session whose goal remains active and goals
+   whose latest turn ended with `interrupted: true`.
 2. **Round limit:** goal is blocked for `round-limit`, or active and disarmed
    after reaching configured round limit.
 
