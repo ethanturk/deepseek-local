@@ -18,6 +18,7 @@ function createHarness(options: {
     signal?: AbortSignal,
   ) => Promise<Record<string, unknown>>;
   activeAgentId?: string;
+  parentAgentId?: string;
 }) {
   const handlers = new Map<string, Handler>() as TestHandlers;
   const settings = {
@@ -57,6 +58,9 @@ function createHarness(options: {
       currentAgent: () => options.activeAgentId
         ? { id: options.activeAgentId }
         : undefined,
+      currentInitiator: () => options.parentAgentId
+        ? { id: options.parentAgentId }
+        : undefined,
     },
     effect() { return () => {}; },
     inject(_dependencies: string[], callback: (context: unknown) => void) {
@@ -91,6 +95,40 @@ function createHarness(options: {
   applyRouter(ctx as never);
   return handlers;
 }
+
+test("subagent keeps inherited tier for its initial request", async () => {
+  const handlers = createHarness({
+    activeAgentId: "child-agent",
+    parentAgentId: "parent-agent",
+    stream: async function* (options) {
+      if (options.provider === "remote" && options.model === "remote-classifier") {
+        yield* textStream("hard");
+      }
+    },
+  });
+  handlers.modelRouter.forceTier("parent-agent", "smart");
+  const messages = [{
+    role: "user",
+    content: "Perform a complex delegated repository audit.",
+  }];
+  const agent = {
+    id: "child-agent",
+    session: { deriveMessages: () => messages },
+  };
+
+  await handlers.get("agent/created")?.({ agent });
+  await handlers.get("agent/pre-step")?.(
+    { agent, messages, signal: new AbortController().signal },
+    () => undefined,
+  );
+  const selection = await handlers.get("agent/request")?.(
+    { agent, signal: new AbortController().signal },
+    () => ({ provider: "physical", model: "default" }),
+  );
+
+  assert.deepEqual(selection, { provider: "local", model: "local-medium" });
+  assert.equal(handlers.modelRouter.getCurrentTier("child-agent"), "medium");
+});
 
 test("model failure escalation advances the tier for the active request", async () => {
   const signal = new AbortController().signal;

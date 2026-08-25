@@ -187,6 +187,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
   );
   const state = new Map<string, RouterState>();
   const tierBySignal = new WeakMap<object, TierId>();
+  const inheritedSubagentTiers = new Set<string>();
   const llm = (ctx as any).llm;
   // ---------- helpers ----------
 
@@ -606,8 +607,10 @@ ${assistantResponse.slice(0, 3000)}`;
       }
 
       if (typeof userText === "string" && userText.trim()) {
+        const keepInheritedTier = inheritedSubagentTiers.delete(agentId);
         // Skip re-classification while sticky or while regenerating
         if (
+          !keepInheritedTier &&
           !s.stickyUntil &&
           !s.pendingRegenerate &&
           userText !== s.lastUserMessage
@@ -651,6 +654,8 @@ ${assistantResponse.slice(0, 3000)}`;
             tierId,
             messagePreview: userText.slice(0, 120),
           });
+        } else if (keepInheritedTier) {
+          s.lastUserMessage = userText;
         }
       }
       if (payload?.signal && typeof payload.signal === "object") {
@@ -852,6 +857,7 @@ ${assistantResponse.slice(0, 3000)}`;
 
       const childState = getOrCreateState(childId);
       childState.currentTierId = childTier;
+      inheritedSubagentTiers.add(childId);
       emitDecision(childId, "subagent-tier", {
         parentId,
         parentTier,
