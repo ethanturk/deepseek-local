@@ -373,10 +373,21 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     const code = String(failure?.code ?? "UNKNOWN");
     const message = String(failure?.message ?? failure ?? "model request failed");
     const reason = `${code}: ${message}`;
+    const guardState = getOrCreate(agentId);
+    if (
+      code === "CONTEXT_WINDOW_EXCEEDED" &&
+      guardState.contextOverflowRecoveryAttempted
+    ) {
+      emitGuardEvent(agentId, "context-overflow-retry-exhausted", { code });
+      return downstream;
+    }
     const router = (ctx as any).modelRouter;
     const tierId = router?.escalateTier?.(agentId, reason, signal);
     if (!tierId) return downstream;
 
+    if (code === "CONTEXT_WINDOW_EXCEEDED") {
+      guardState.contextOverflowRecoveryAttempted = true;
+    }
     emitGuardEvent(agentId, "model-failure-escalate", { code, tierId });
     return { kind: "retry" };
   });
@@ -505,6 +516,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       const s = state.get(agentId);
       if (!s) return;
       s.emptyResponseRecoveryAttempted = false;
+      s.contextOverflowRecoveryAttempted = false;
       // Decay recent failure counter each turn
       s.recentToolFailures = Math.max(0, s.recentToolFailures - 1);
     } catch {

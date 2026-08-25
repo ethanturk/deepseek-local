@@ -43,6 +43,8 @@ export interface GuardState {
   pendingAskRetry?: string;
   /** Prevent repeated empty-response recovery within one turn. */
   emptyResponseRecoveryAttempted?: boolean;
+  /** Prevent repeated context-overflow retries after native compaction declines. */
+  contextOverflowRecoveryAttempted?: boolean;
   /** One controlled retry instruction after an opaque subagent runtime failure. */
   pendingSubagentRetry?: string;
   /** Optional recent tool failure count for heuristic context. */

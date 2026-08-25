@@ -311,6 +311,63 @@ test("unrecovered model failures escalate and retry on the next tier", async () 
   }]);
 });
 
+test("context overflow gets one fallback retry after compaction declines", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const escalations: string[] = [];
+  const events: Array<Record<string, unknown>> = [];
+  const ctx = {
+    modelRouter: {
+      isLocalGuardrailsEnabled() { return true; },
+      escalateTier(_agentId: string, reason: string) {
+        escalations.push(reason);
+        return "medium";
+      },
+    },
+    sessions: {
+      appendEvent(event: Record<string, unknown>) { events.push(event); },
+    },
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  };
+
+  apply(ctx as any, {
+    enableRetries: false,
+    enableSystemPromptHint: false,
+    forceAlways: true,
+  });
+
+  const requestError = handlers.get("agent/request-error");
+  assert.ok(requestError);
+  const payload = {
+    agent: { id: "agent-1" },
+    failure: {
+      code: "CONTEXT_WINDOW_EXCEEDED",
+      message: "request exceeds context size",
+    },
+    signal: new AbortController().signal,
+  };
+  const declineCompaction = async () => undefined;
+
+  assert.deepEqual(await requestError(payload, declineCompaction), {
+    kind: "retry",
+  });
+  assert.equal(await requestError(payload, declineCompaction), undefined);
+  assert.equal(escalations.length, 1);
+  assert.equal(
+    events.some((event) =>
+      event.type === "local-guard/context-overflow-retry-exhausted"
+    ),
+    true,
+  );
+
+  handlers.get("turn/end")?.({ agentId: "agent-1" });
+  assert.deepEqual(await requestError(payload, declineCompaction), {
+    kind: "retry",
+  });
+  assert.equal(escalations.length, 2);
+});
+
 test("existing request recovery wins without escalation", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let escalations = 0;

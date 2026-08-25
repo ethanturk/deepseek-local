@@ -473,7 +473,7 @@ ${assistantResponse.slice(0, 3000)}`;
     /** LlmAdapter.providerRetryPolicy — retry policy for the provider */
     providerRetryPolicy(_provider: string) {
       console.error(`[dsh-model-router] adapter.providerRetryPolicy("${_provider}")`);
-      return { maxRetries: 3, retryDelay: 1000 };
+      return undefined;
     }
 
     /** LlmAdapter.listModels — return the virtual model for this provider */

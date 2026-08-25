@@ -414,6 +414,15 @@ test("router diagnostics use stderr rather than the protocol stdout channel", ()
   assert.match(String(stderr[0][0]), /adapter\.providerInfo/);
 });
 
+test("virtual provider delegates retry policy resolution to DSH", () => {
+  const handlers = createHarness({});
+
+  assert.equal(
+    handlers.adapter.providerRetryPolicy("auto-tier"),
+    undefined,
+  );
+});
+
 test("malformed validator output is retried once then pauses automatic routing", async () => {
   let validatorAttempts = 0;
   const handlers = createHarness({
