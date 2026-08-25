@@ -23,6 +23,11 @@
  */
 
 import type { Context } from "@deepseek-ai/cordis";
+import {
+  installSettingsSection,
+  settingsNamespace,
+} from "@deepseek-ai/dsh-settings";
+import z from "@deepseek-ai/schemastery";
 import { randomUUID } from "node:crypto";
 import {
   type GuardState,
@@ -32,14 +37,40 @@ import {
 
 export const name = "dsh-local-model-guard";
 export const inject = [
+  "compaction",
+  "llm",
+  "tokenMeter",
   "tools",
   "modelRouter",
   "systemPrompt",
   "sessions",
+  "settings",
 ];
 
+interface ContextPressureSettings {
+  contextPressureThreshold: number;
+}
+
+export const LOCAL_MODEL_GUARD_SETTINGS_NAMESPACE = settingsNamespace(
+  "local-model-guard",
+);
+
+export const LOCAL_MODEL_GUARD_SETTINGS_SCHEMA = z.object({
+  contextPressureThreshold: z.number().required(),
+});
+
+function validateContextPressureThreshold(value: number): void {
+  if (!Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new TypeError(
+      "contextPressureThreshold must be greater than 0 and at most 1",
+    );
+  }
+}
+
 function resolveConfig(raw?: Partial<LocalGuardConfig>): LocalGuardConfig {
-  return { ...DEFAULT_GUARD_CONFIG, ...raw };
+  const config = { ...DEFAULT_GUARD_CONFIG, ...raw };
+  validateContextPressureThreshold(config.contextPressureThreshold);
+  return config;
 }
 
 /** Stable-ish signature for loop detection (name + JSON args). */
@@ -88,7 +119,30 @@ function isOpaqueSubagentFailure(
 }
 
 export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
-  const config = resolveConfig(rawConfig);
+  const compositionConfig = resolveConfig(rawConfig);
+  let config = compositionConfig;
+  let settingsSource = (): ContextPressureSettings => ({
+    contextPressureThreshold: compositionConfig.contextPressureThreshold,
+  });
+  if (typeof (ctx as any).inject === "function") {
+    installSettingsSection(
+      ctx,
+      LOCAL_MODEL_GUARD_SETTINGS_NAMESPACE,
+      LOCAL_MODEL_GUARD_SETTINGS_SCHEMA as z<ContextPressureSettings>,
+      settingsSource(),
+      {
+        setSource(source) {
+          settingsSource = source;
+        },
+        onChange() {
+          config = resolveConfig({ ...compositionConfig, ...settingsSource() });
+        },
+        validate(value) {
+          validateContextPressureThreshold(value.contextPressureThreshold);
+        },
+      },
+    );
+  }
   const state = new Map<string, GuardState>();
 
   function getOrCreate(agentId: string): GuardState {
@@ -156,6 +210,79 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       ],
       source: { kind: "plugin" as const, plugin: name },
     };
+  }
+
+  async function compactForContextPressure(
+    claim: any,
+    agentId: string,
+    guardState: GuardState,
+  ): Promise<void> {
+    if (guardState.contextPressureCompactionAttempted) return;
+    const agent = claim?.agent;
+    const router = (ctx as any).modelRouter;
+    const tierId = router?.getCurrentTier?.(agentId);
+    const tier = tierId && router?.getTierConfig?.(tierId);
+    if (!agent?.session || !tier?.provider || !tier?.model) return;
+
+    try {
+      const signal = claim?.signal;
+      const modelInfo = await (ctx as any).llm?.resolveModelInfo?.(
+        tier.provider,
+        tier.model,
+        signal,
+      );
+      const contextWindow = Number(modelInfo?.context?.contextWindow);
+      const totalTokens = Number(
+        (ctx as any).tokenMeter?.measure?.(agent.session)?.totalTokens,
+      );
+      if (
+        !Number.isFinite(contextWindow) ||
+        contextWindow <= 0 ||
+        !Number.isFinite(totalTokens) ||
+        totalTokens < contextWindow * config.contextPressureThreshold
+      ) {
+        return;
+      }
+
+      guardState.contextPressureCompactionAttempted = true;
+      emitGuardEvent(agentId, "context-pressure", {
+        contextWindow,
+        threshold: config.contextPressureThreshold,
+        totalTokens,
+      });
+      try {
+        const result = await (ctx as any).compaction?.compactIfNeeded?.(
+          agent,
+          "pressure",
+          signal,
+        );
+        if (result) {
+          emitGuardEvent(agentId, "context-pressure-compacted", {
+            contextWindow,
+            totalTokens,
+          });
+          return;
+        }
+        const reason =
+          `CONTEXT_PRESSURE_COMPACTION_NOOP: ${totalTokens}/${contextWindow} tokens`;
+        const escalatedTierId = router?.escalateTier?.(agentId, reason, signal);
+        emitGuardEvent(agentId, "context-pressure-escalate", {
+          reason,
+          tierId: escalatedTierId,
+        });
+      } catch (error) {
+        const message = String((error as any)?.message ?? error);
+        const reason =
+          `CONTEXT_PRESSURE_COMPACTION_FAILED: ${totalTokens}/${contextWindow} tokens: ${message}`;
+        const escalatedTierId = router?.escalateTier?.(agentId, reason, signal);
+        emitGuardEvent(agentId, "context-pressure-escalate", {
+          reason,
+          tierId: escalatedTierId,
+        });
+      }
+    } catch (error) {
+      console.warn("[dsh-local-model-guard] context pressure check failed", error);
+    }
   }
 
   // ---------- Tiny system-prompt section (keeps context small) ----------
@@ -405,6 +532,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
 
       const s = getOrCreate(agentId);
       s.askCallsThisStep = 0;
+      await compactForContextPressure(claim, agentId, s);
       if (s.pendingAskRetry) {
         recoveryReason = s.pendingAskRetry;
         s.pendingAskRetry = undefined;
@@ -517,6 +645,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       if (!s) return;
       s.emptyResponseRecoveryAttempted = false;
       s.contextOverflowRecoveryAttempted = false;
+      s.contextPressureCompactionAttempted = false;
       // Decay recent failure counter each turn
       s.recentToolFailures = Math.max(0, s.recentToolFailures - 1);
     } catch {
@@ -527,7 +656,8 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   console.error(
     `[dsh-local-model-guard] loaded – maxFailures=${config.maxConsecutiveFailures}, ` +
       `maxRepeated=${config.maxRepeatedCalls}, window=${config.windowSize}, ` +
-      `retries=${config.enableRetries ? config.maxRetries : 0}, forceAlways=${config.forceAlways}`,
+      `retries=${config.enableRetries ? config.maxRetries : 0}, ` +
+      `contextPressure=${config.contextPressureThreshold}, forceAlways=${config.forceAlways}`,
   );
 }
 

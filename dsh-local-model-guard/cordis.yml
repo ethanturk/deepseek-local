@@ -2,6 +2,11 @@
 #
 # Load together with the router via dsh-combined-patch.yml at the repo root.
 
+- id: compaction-basic
+  disabled: false
+  config:
+    auto: false
+
 - insert:
     - id: dsh-local-model-guard
       name: "dsh-local-model-guard"
@@ -12,4 +17,5 @@
       #   windowSize: 6
       #   enableRetries: true
       #   maxRetries: 1
+      #   contextPressureThreshold: 0.9
       #   forceAlways: false

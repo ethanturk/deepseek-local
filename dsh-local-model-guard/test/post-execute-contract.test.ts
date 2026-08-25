@@ -78,6 +78,198 @@ test("repeated tools add recovery to the pre-step decision", async () => {
   assert.match(JSON.stringify(decision.messages[0].content), /repeated tool signature/);
 });
 
+test("context pressure compacts at the configured model-window threshold", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const compactCalls: Array<{ trigger: string; signal: AbortSignal }> = [];
+  const signal = new AbortController().signal;
+  const agent = { id: "agent-1", session: {} };
+  const ctx = {
+    compaction: {
+      async compactIfNeeded(_agent: unknown, trigger: string, activeSignal: AbortSignal) {
+        compactCalls.push({ trigger, signal: activeSignal });
+        return { compacted: true };
+      },
+    },
+    llm: {
+      async resolveModelInfo() {
+        return { context: { contextWindow: 100 } };
+      },
+    },
+    modelRouter: {
+      getCurrentTier() { return "fast"; },
+      getTierConfig() {
+        return { provider: "local", model: "local-fast", enableLocalGuardrails: true };
+      },
+      isLocalGuardrailsEnabled() { return true; },
+    },
+    tokenMeter: {
+      measure() { return { totalTokens: 90 }; },
+    },
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  };
+
+  apply(ctx as any, {
+    contextPressureThreshold: 0.9,
+    enableRetries: false,
+    enableSystemPromptHint: false,
+    forceAlways: true,
+  });
+
+  const preStep = handlers.get("agent/pre-step");
+  assert.ok(preStep);
+  await preStep(
+    { agent, messages: [], signal },
+    async () => ({ kind: "enter", messages: [] }),
+  );
+
+  assert.deepEqual(compactCalls, [{ trigger: "pressure", signal }]);
+});
+
+test("context pressure stays idle below threshold", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  let compactCalls = 0;
+  let measureCalls = 0;
+  const ctx = {
+    compaction: {
+      async compactIfNeeded() { compactCalls += 1; },
+    },
+    llm: {
+      async resolveModelInfo() {
+        return { context: { contextWindow: 100 } };
+      },
+    },
+    modelRouter: {
+      getCurrentTier() { return "fast"; },
+      getTierConfig() {
+        return { provider: "local", model: "local-fast", enableLocalGuardrails: true };
+      },
+      isLocalGuardrailsEnabled() { return true; },
+    },
+    tokenMeter: {
+      measure() {
+        measureCalls += 1;
+        return { totalTokens: 89 };
+      },
+    },
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  };
+
+  apply(ctx as any, {
+    contextPressureThreshold: 0.9,
+    enableRetries: false,
+    enableSystemPromptHint: false,
+    forceAlways: true,
+  });
+
+  await handlers.get("agent/pre-step")?.(
+    { agent: { id: "agent-1", session: {} }, messages: [], signal: new AbortController().signal },
+    async () => ({ kind: "enter", messages: [] }),
+  );
+
+  assert.equal(measureCalls, 1);
+  assert.equal(compactCalls, 0);
+});
+
+test("failed context-pressure compaction escalates once per turn", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  let compactCalls = 0;
+  const escalations: string[] = [];
+  const ctx = {
+    compaction: {
+      async compactIfNeeded() {
+        compactCalls += 1;
+        throw new Error("summarization produced no text summary content");
+      },
+    },
+    llm: {
+      async resolveModelInfo() {
+        return { context: { contextWindow: 100 } };
+      },
+    },
+    modelRouter: {
+      getCurrentTier() { return "fast"; },
+      getTierConfig() {
+        return { provider: "local", model: "local-fast", enableLocalGuardrails: true };
+      },
+      isLocalGuardrailsEnabled() { return true; },
+      escalateTier(_agentId: string, reason: string) {
+        escalations.push(reason);
+        return "medium";
+      },
+    },
+    tokenMeter: {
+      measure() { return { totalTokens: 95 }; },
+    },
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  };
+
+  apply(ctx as any, {
+    contextPressureThreshold: 0.9,
+    enableRetries: false,
+    enableSystemPromptHint: false,
+    forceAlways: true,
+  });
+
+  const preStep = handlers.get("agent/pre-step");
+  assert.ok(preStep);
+  const claim = {
+    agent: { id: "agent-1", session: {} },
+    messages: [],
+    signal: new AbortController().signal,
+  };
+  const next = async () => ({ kind: "enter", messages: [] });
+  await preStep(claim, next);
+  await preStep(claim, next);
+
+  assert.equal(compactCalls, 1);
+  assert.deepEqual(escalations, [
+    "CONTEXT_PRESSURE_COMPACTION_FAILED: 95/100 tokens: summarization produced no text summary content",
+  ]);
+});
+
+test("context pressure threshold rejects values outside zero to one", () => {
+  const ctx = {
+    on() {},
+  };
+
+  assert.throws(
+    () => apply(ctx as any, { contextPressureThreshold: 1.1 }),
+    /contextPressureThreshold must be greater than 0 and at most 1/,
+  );
+});
+
+test("context pressure threshold is sourced from DSH settings", () => {
+  const registrations: string[] = [];
+  const ctx = {
+    effect() {},
+    inject(_services: string[], install: (settingsCtx: unknown) => void) {
+      install({
+        effect() {},
+        settings: {
+          register(namespace: string) {
+            registrations.push(namespace);
+            return {
+              get() { return { contextPressureThreshold: 0.95 }; },
+              watch() { return () => {}; },
+            };
+          },
+        },
+      });
+    },
+    on() {},
+  };
+
+  apply(ctx as any, { contextPressureThreshold: 0.9 });
+
+  assert.deepEqual(registrations, ["local-model-guard"]);
+});
+
 test("opaque subagent tool failure escalates the next model request", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const escalations: Array<{ agentId: string; reason: string }> = [];

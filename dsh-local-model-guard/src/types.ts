@@ -19,6 +19,9 @@ export interface LocalGuardConfig {
   /** Max retries per tool call (0 or 1 recommended). Default 1. */
   maxRetries: number;
 
+  /** Compact before a local model reaches this fraction of its context window. Default 0.9. */
+  contextPressureThreshold: number;
+
   /** When true, also apply a short system-prompt section. Default true. */
   enableSystemPromptHint: boolean;
 
@@ -45,6 +48,8 @@ export interface GuardState {
   emptyResponseRecoveryAttempted?: boolean;
   /** Prevent repeated context-overflow retries after native compaction declines. */
   contextOverflowRecoveryAttempted?: boolean;
+  /** Prevent repeated proactive compaction attempts within one turn. */
+  contextPressureCompactionAttempted?: boolean;
   /** One controlled retry instruction after an opaque subagent runtime failure. */
   pendingSubagentRetry?: string;
   /** Optional recent tool failure count for heuristic context. */
@@ -64,6 +69,7 @@ export const DEFAULT_GUARD_CONFIG: LocalGuardConfig = {
   windowSize: 6,
   enableRetries: true,
   maxRetries: 1,
+  contextPressureThreshold: 0.9,
   enableSystemPromptHint: true,
   forceAlways: false,
   recoveryMessage:

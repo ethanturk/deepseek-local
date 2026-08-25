@@ -4,6 +4,11 @@
 # Usage from a deepseek-harness checkout:
 #   pnpm dsh web --patch /ABSOLUTE_REPO_ROOT/dsh-combined-patch.yml
 
+- id: compaction-basic
+  disabled: false
+  config:
+    auto: false
+
 - insert:
     - id: dsh-model-router
       name: "/ABSOLUTE_REPO_ROOT/dsh-model-router/src/index.ts"
@@ -15,6 +20,7 @@
       #   maxConsecutiveFailures: 2
       #   maxRepeatedCalls: 2
       #   windowSize: 6
+      #   contextPressureThreshold: 0.9
       #   forceAlways: false
 
     - id: dsh-openai-gateway
