@@ -47,8 +47,9 @@ export const inject = [
   "settings",
 ];
 
-interface ContextPressureSettings {
+interface LocalGuardSettings {
   contextPressureThreshold: number;
+  maxConcurrentSubagents: number;
 }
 
 export const LOCAL_MODEL_GUARD_SETTINGS_NAMESPACE = settingsNamespace(
@@ -57,6 +58,7 @@ export const LOCAL_MODEL_GUARD_SETTINGS_NAMESPACE = settingsNamespace(
 
 export const LOCAL_MODEL_GUARD_SETTINGS_SCHEMA = z.object({
   contextPressureThreshold: z.number().required(),
+  maxConcurrentSubagents: z.number().required(),
 });
 
 function validateContextPressureThreshold(value: number): void {
@@ -67,9 +69,18 @@ function validateContextPressureThreshold(value: number): void {
   }
 }
 
+function validateMaxConcurrentSubagents(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(
+      "maxConcurrentSubagents must be a positive safe integer",
+    );
+  }
+}
+
 function resolveConfig(raw?: Partial<LocalGuardConfig>): LocalGuardConfig {
   const config = { ...DEFAULT_GUARD_CONFIG, ...raw };
   validateContextPressureThreshold(config.contextPressureThreshold);
+  validateMaxConcurrentSubagents(config.maxConcurrentSubagents);
   return config;
 }
 
@@ -121,14 +132,92 @@ function isOpaqueSubagentFailure(
 export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   const compositionConfig = resolveConfig(rawConfig);
   let config = compositionConfig;
-  let settingsSource = (): ContextPressureSettings => ({
+  let settingsSource = (): LocalGuardSettings => ({
     contextPressureThreshold: compositionConfig.contextPressureThreshold,
+    maxConcurrentSubagents: compositionConfig.maxConcurrentSubagents,
   });
+  interface SubagentReservation { claimed: boolean }
+  interface SubagentWaiter {
+    resolve: (reservation: SubagentReservation) => void;
+    reject: (error: Error) => void;
+    signal?: AbortSignal;
+    abort?: () => void;
+  }
+  const subagentReservations: SubagentReservation[] = [];
+  const activeSubagentRuns = new Set<string>();
+  const subagentWaiters: SubagentWaiter[] = [];
+
+  function removeWaiter(waiter: SubagentWaiter): void {
+    const index = subagentWaiters.indexOf(waiter);
+    if (index >= 0) subagentWaiters.splice(index, 1);
+  }
+
+  function drainSubagentQueue(): void {
+    while (
+      subagentWaiters.length > 0 &&
+      activeSubagentRuns.size + subagentReservations.length <
+        config.maxConcurrentSubagents
+    ) {
+      const waiter = subagentWaiters.shift()!;
+      if (waiter.abort && waiter.signal) {
+        waiter.signal.removeEventListener("abort", waiter.abort);
+      }
+      if (waiter.signal?.aborted) {
+        waiter.reject(Object.assign(new Error("Subagent launch cancelled"), {
+          name: "AbortError",
+        }));
+        continue;
+      }
+      const reservation = { claimed: false };
+      subagentReservations.push(reservation);
+      waiter.resolve(reservation);
+    }
+  }
+
+  function acquireSubagentSlot(
+    signal?: AbortSignal,
+  ): Promise<SubagentReservation> {
+    if (signal?.aborted) {
+      return Promise.reject(Object.assign(new Error("Subagent launch cancelled"), {
+        name: "AbortError",
+      }));
+    }
+    if (
+      activeSubagentRuns.size + subagentReservations.length <
+      config.maxConcurrentSubagents
+    ) {
+      const reservation = { claimed: false };
+      subagentReservations.push(reservation);
+      return Promise.resolve(reservation);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: SubagentWaiter = { resolve, reject, signal };
+      if (signal) {
+        waiter.abort = () => {
+          removeWaiter(waiter);
+          reject(Object.assign(new Error("Subagent launch cancelled"), {
+            name: "AbortError",
+          }));
+        };
+        signal.addEventListener("abort", waiter.abort, { once: true });
+      }
+      subagentWaiters.push(waiter);
+    });
+  }
+
+  function releaseSubagentReservation(
+    reservation: SubagentReservation,
+  ): void {
+    const index = subagentReservations.indexOf(reservation);
+    if (index >= 0) subagentReservations.splice(index, 1);
+    drainSubagentQueue();
+  }
+
   if (typeof (ctx as any).inject === "function") {
     installSettingsSection(
       ctx,
       LOCAL_MODEL_GUARD_SETTINGS_NAMESPACE,
-      LOCAL_MODEL_GUARD_SETTINGS_SCHEMA as z<ContextPressureSettings>,
+      LOCAL_MODEL_GUARD_SETTINGS_SCHEMA as z<LocalGuardSettings>,
       settingsSource(),
       {
         setSource(source) {
@@ -136,14 +225,30 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
         },
         onChange() {
           config = resolveConfig({ ...compositionConfig, ...settingsSource() });
+          drainSubagentQueue();
         },
         validate(value) {
           validateContextPressureThreshold(value.contextPressureThreshold);
+          validateMaxConcurrentSubagents(value.maxConcurrentSubagents);
         },
       },
     );
   }
   const state = new Map<string, GuardState>();
+
+  ctx.on("subagent/start" as any, (info: any) => {
+    const runId = String(info?.runId ?? "");
+    if (!runId || activeSubagentRuns.has(runId)) return;
+    const reservation = subagentReservations.shift();
+    if (reservation) reservation.claimed = true;
+    activeSubagentRuns.add(runId);
+  });
+
+  ctx.on("subagent/end" as any, (info: any) => {
+    const runId = String(info?.runId ?? "");
+    if (!runId || !activeSubagentRuns.delete(runId)) return;
+    drainSubagentQueue();
+  });
 
   function getOrCreate(agentId: string): GuardState {
     let s = state.get(agentId);
@@ -420,57 +525,70 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   // ---------- Guard asks and optionally retry transient tool failures ----------
   ctx.on("tools/execute" as any, async (exec: any, next: any) => {
     const agentId = exec?.agentId ?? exec?.agent?.id ?? "default";
-    if (!shouldEnforce(agentId)) {
-      return next?.();
-    }
-
     const toolName = String(
       exec?.name ?? exec?.toolName ?? exec?.tool?.name ?? "",
     );
-    if (toolName === "ask_user_question") {
-      const s = getOrCreate(agentId);
-      if (s.askCallsThisStep >= 1) {
-        const reason = "DUPLICATE_ASK_USER_QUESTION";
-        const tierId = (ctx as any).modelRouter?.escalateTier?.(
-          agentId,
-          reason,
-          exec?.signal,
-        );
-        if (tierId) {
-          s.pendingAskRetry =
-            "Ask the user once on this higher tier. Use one ask_user_question call with a valid questions array; do not send todo arguments or a second ask call.";
-        }
-        emitGuardEvent(agentId, "duplicate-ask-blocked", { tierId, reason });
-        throw new Error(
-          "Only one ask_user_question call is allowed per model step",
-        );
-      }
-      s.askCallsThisStep += 1;
-    }
+    const isSubagentTool =
+      toolName === "subagent" || toolName === "subagent_fork";
+    const reservation = isSubagentTool
+      ? await acquireSubagentSlot(exec?.signal)
+      : undefined;
 
-    if (!config.enableRetries || config.maxRetries <= 0) {
-      return next?.();
-    }
-
-    let lastErr: unknown;
-    const attempts = 1 + config.maxRetries;
-    for (let i = 0; i < attempts; i++) {
-      try {
+    try {
+      if (!shouldEnforce(agentId)) {
         return await next?.();
-      } catch (err) {
-        lastErr = err;
-        const msg = String((err as any)?.message ?? err);
-        // Only retry likely-transient failures
-        const transient =
-          /timeout|econnreset|socket|temporarily|rate limit|503|502/i.test(
-            msg,
+      }
+
+      if (toolName === "ask_user_question") {
+        const s = getOrCreate(agentId);
+        if (s.askCallsThisStep >= 1) {
+          const reason = "DUPLICATE_ASK_USER_QUESTION";
+          const tierId = (ctx as any).modelRouter?.escalateTier?.(
+            agentId,
+            reason,
+            exec?.signal,
           );
-        if (!transient || i === attempts - 1) throw err;
-        // brief backoff
-        await new Promise((r) => setTimeout(r, 150 * (i + 1)));
+          if (tierId) {
+            s.pendingAskRetry =
+              "Ask the user once on this higher tier. Use one ask_user_question call with a valid questions array; do not send todo arguments or a second ask call.";
+          }
+          emitGuardEvent(agentId, "duplicate-ask-blocked", { tierId, reason });
+          throw new Error(
+            "Only one ask_user_question call is allowed per model step",
+          );
+        }
+        s.askCallsThisStep += 1;
+      }
+
+      if (!config.enableRetries || config.maxRetries <= 0) {
+        return await next?.();
+      }
+
+      let lastErr: unknown;
+      const attempts = 1 + config.maxRetries;
+      for (let i = 0; i < attempts; i++) {
+        try {
+          return await next?.();
+        } catch (err) {
+          lastErr = err;
+          const msg = String((err as any)?.message ?? err);
+          // Never retry an execution that already published a live child.
+          const transient =
+            !reservation?.claimed &&
+            /timeout|econnreset|socket|temporarily|rate limit|503|502/i.test(
+              msg,
+            );
+          if (!transient || i === attempts - 1) throw err;
+          // brief backoff
+          await new Promise((r) => setTimeout(r, 150 * (i + 1)));
+        }
+      }
+      throw lastErr;
+    } finally {
+      if (reservation && !reservation.claimed) {
+        releaseSubagentReservation(reservation);
       }
     }
-    throw lastErr;
   });
 
   // ---------- Recover model request failures ----------
@@ -657,7 +775,8 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     `[dsh-local-model-guard] loaded – maxFailures=${config.maxConsecutiveFailures}, ` +
       `maxRepeated=${config.maxRepeatedCalls}, window=${config.windowSize}, ` +
       `retries=${config.enableRetries ? config.maxRetries : 0}, ` +
-      `contextPressure=${config.contextPressureThreshold}, forceAlways=${config.forceAlways}`,
+      `contextPressure=${config.contextPressureThreshold}, ` +
+      `maxSubagents=${config.maxConcurrentSubagents}, forceAlways=${config.forceAlways}`,
   );
 }
 

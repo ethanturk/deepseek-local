@@ -16,11 +16,13 @@
 
     - id: dsh-local-model-guard
       name: "/ABSOLUTE_REPO_ROOT/dsh-local-model-guard/src/index.ts"
+      # Runtime controls belong in the local-model-guard section of settings.yaml.
       # config:
       #   maxConsecutiveFailures: 2
       #   maxRepeatedCalls: 2
       #   windowSize: 6
       #   contextPressureThreshold: 0.9
+      #   maxConcurrentSubagents: 2
       #   forceAlways: false
 
     - id: dsh-openai-gateway

@@ -65,7 +65,23 @@ pnpm dsh web \
 
 Or merge both `insert` rows into one patch file.
 
-## Config example
+## Settings
+
+Put runtime controls in `~/.dsh/settings.yaml`:
+
+```yaml
+local-model-guard:
+  contextPressureThreshold: 0.9
+  maxConcurrentSubagents: 2
+```
+
+`maxConcurrentSubagents` is a process-wide cap. Extra `subagent` and
+`subagent_fork` calls wait in launch order until a live child emits
+`subagent/end`. Ordinary tools are not limited. Reducing the value does not
+cancel children that are already running; it prevents new launches until usage
+falls below the new limit.
+
+## Composition config example
 
 ```yaml
 - insert:
@@ -77,6 +93,7 @@ Or merge both `insert` rows into one patch file.
         windowSize: 6
         enableRetries: true
         maxRetries: 1
+        maxConcurrentSubagents: 2
         forceAlways: false
         recoveryMessage: "Tool calls failed or repeated. Do not retry the same call. State the error in one sentence, then try a different approach."
 ```

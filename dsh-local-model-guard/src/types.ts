@@ -22,6 +22,9 @@ export interface LocalGuardConfig {
   /** Compact before a local model reaches this fraction of its context window. Default 0.9. */
   contextPressureThreshold: number;
 
+  /** Maximum number of live subagents across the DSH process. Default 2. */
+  maxConcurrentSubagents: number;
+
   /** When true, also apply a short system-prompt section. Default true. */
   enableSystemPromptHint: boolean;
 
@@ -70,6 +73,7 @@ export const DEFAULT_GUARD_CONFIG: LocalGuardConfig = {
   enableRetries: true,
   maxRetries: 1,
   contextPressureThreshold: 0.9,
+  maxConcurrentSubagents: 2,
   enableSystemPromptHint: true,
   forceAlways: false,
   recoveryMessage:

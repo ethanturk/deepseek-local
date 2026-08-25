@@ -419,6 +419,84 @@ test("a model step cannot execute two ask calls", async () => {
   assert.deepEqual(escalations, ["DUPLICATE_ASK_USER_QUESTION"]);
 });
 
+test("subagent executions queue at the global configured limit", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const ctx = {
+    modelRouter: {
+      isLocalGuardrailsEnabled() { return false; },
+    },
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  };
+
+  apply(ctx as any, {
+    maxConcurrentSubagents: 1,
+    enableRetries: false,
+    enableSystemPromptHint: false,
+  });
+
+  const execute = handlers.get("tools/execute");
+  const subagentStart = handlers.get("subagent/start");
+  const subagentEnd = handlers.get("subagent/end");
+  assert.ok(execute);
+  assert.ok(subagentStart);
+  assert.ok(subagentEnd);
+
+  let releaseFirst!: () => void;
+  let firstStarted = false;
+  let secondStarted = false;
+  const first = execute(
+    { agentId: "parent-1", name: "subagent" },
+    async () => {
+      firstStarted = true;
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      await subagentStart({ runId: "run-1", id: "child-1" });
+      return { kind: "accept" };
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(firstStarted, true);
+
+  const second = execute(
+    { agentId: "parent-2", name: "subagent_fork" },
+    async () => {
+      secondStarted = true;
+      await subagentStart({ runId: "run-2", id: "child-2" });
+      return { kind: "accept" };
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondStarted, false);
+
+  releaseFirst();
+  assert.deepEqual(await first, { kind: "accept" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondStarted, false);
+
+  assert.deepEqual(
+    await execute(
+      { agentId: "parent-3", name: "read_file" },
+      async () => ({ kind: "ordinary-tool" }),
+    ),
+    { kind: "ordinary-tool" },
+  );
+
+  await subagentEnd({ runId: "run-1", id: "child-1" });
+  assert.deepEqual(await second, { kind: "accept" });
+  assert.equal(secondStarted, true);
+  await subagentEnd({ runId: "run-2", id: "child-2" });
+});
+
+test("subagent concurrency rejects non-positive limits", () => {
+  const ctx = { on() {} };
+
+  assert.throws(
+    () => apply(ctx as any, { maxConcurrentSubagents: 0 }),
+    /maxConcurrentSubagents must be a positive safe integer/,
+  );
+});
+
 test("user-aborted asks do not trigger failure recovery", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const ctx = {

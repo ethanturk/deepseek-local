@@ -10,6 +10,7 @@
 - insert:
     - id: dsh-local-model-guard
       name: "dsh-local-model-guard"
+      # Runtime controls belong in the local-model-guard section of settings.yaml.
       # Optional config:
       # config:
       #   maxConsecutiveFailures: 2
@@ -18,4 +19,5 @@
       #   enableRetries: true
       #   maxRetries: 1
       #   contextPressureThreshold: 0.9
+      #   maxConcurrentSubagents: 2
       #   forceAlways: false
