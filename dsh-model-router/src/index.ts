@@ -350,17 +350,26 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
   async function classifyWithLlm(
     message: string,
     conversation: string,
+    useCases: UseCasesConfig,
   ): Promise<ClassifierDecision | null> {
     const { provider, model } = config.classifier;
     if (!provider || !model) return null;
 
     try {
-      const prompt = buildClassifierPrompt(message, conversation, config.useCases);
-      const maxTokens = config.useCases.enabled && config.useCases.rules.length > 0
+      const prompt = buildClassifierPrompt(message, conversation, useCases);
+      const semanticRoutingActive = useCases.enabled && useCases.rules.length > 0;
+      const maxTokens = semanticRoutingActive
         ? 80
         : 8;
       const text = await generateText(provider, model, prompt, maxTokens);
-      return parseClassifierDecision(text, config.useCases);
+      if (!semanticRoutingActive) {
+        const response = text.toLowerCase();
+        if (response.includes("hard")) return { kind: "complexity", complexity: "hard" };
+        if (response.includes("medium")) return { kind: "complexity", complexity: "medium" };
+        if (response.includes("simple")) return { kind: "complexity", complexity: "simple" };
+        return null;
+      }
+      return parseClassifierDecision(text, useCases);
     } catch (err) {
       console.warn("[dsh-model-router] LLM classifier failed", err);
       return null;
@@ -372,8 +381,10 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     context?: { hasFiles?: boolean; recentToolFailures?: number },
     conversation = message,
   ): Promise<ClassifierDecision> {
-    const explicitTier = explicitStrongerTier(message);
-    if (explicitTier) {
+    const useCases = config.useCases;
+    const semanticRoutingActive = useCases.enabled && useCases.rules.length > 0;
+    const explicitTier = semanticRoutingActive && explicitStrongerTier(message);
+    if (explicitTier === "medium" || explicitTier === "smart") {
       return {
         kind: "complexity",
         complexity: explicitTier === "smart" ? "hard" : "medium",
@@ -386,7 +397,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     if (mode === "heuristic") return { kind: "complexity", complexity: heuristic };
 
     if (mode === "llm" || mode === "both") {
-      const llmResult = await classifyWithLlm(message, conversation);
+      const llmResult = await classifyWithLlm(message, conversation, useCases);
       if (llmResult?.kind === "use-case") return llmResult;
       if (llmResult && mode === "both") {
         return {

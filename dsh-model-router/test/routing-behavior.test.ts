@@ -729,6 +729,56 @@ test("disabled semantic use cases preserve legacy classifier behavior", async ()
   });
 });
 
+for (const [response, classifierMode, expectedTier, expectedComplexity] of [
+  ["hard.", "llm", "smart", "hard"],
+  ["The request is medium difficulty.", "both", "medium", "medium"],
+  ["This is simple to answer.", "llm", "fast", "simple"],
+] as const) {
+  test(`disabled semantic routing accepts legacy classifier response: ${response}`, async () => {
+    const handlers = createHarness({
+      classifierMode,
+      stream: async function* () {
+        yield* textStream(response);
+      },
+    });
+    const message = { role: "user", content: "Classify this request", source: { kind: "user" } };
+    const agent = {
+      id: `legacy-classifier-${expectedComplexity}`,
+      session: { deriveMessages: () => [message] },
+    };
+
+    await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+    assert.equal(handlers.modelRouter.getCurrentTier(agent.id), expectedTier);
+    assert.equal(
+      handlers.modelRouter.getState(agent.id)?.lastClassification,
+      expectedComplexity,
+    );
+  });
+}
+
+test("disabled semantic routing lets the existing classifier decide explicit wording", async () => {
+  let classifierCalls = 0;
+  const handlers = createHarness({
+    stream: async function* () {
+      classifierCalls += 1;
+      yield* textStream("medium");
+    },
+  });
+  const message = {
+    role: "user",
+    content: "Use the smart model to read PR 81522",
+    source: { kind: "user" },
+  };
+  const agent = { id: "disabled-explicit-wording", session: { deriveMessages: () => [message] } };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+  assert.equal(classifierCalls, 1);
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "medium");
+  assert.equal(handlers.modelRouter.getState(agent.id)?.lastClassification, "medium");
+});
+
 test("unknown semantic use case falls back to both-mode heuristic", async () => {
   const handlers = createHarness({
     useCases: readOnlyUseCases,
@@ -842,6 +892,55 @@ test("hot reload enables semantic routing without reapplying plugin", async () =
   assert.equal(handlers.modelRouter.getCurrentTier(secondAgent.id), "fast");
   assert.equal(handlers.modelRouter.getState(secondAgent.id)?.lastMatchedUseCaseId, "read-only");
   assert.equal(handlers.modelRouter.getCurrentTier(firstAgent.id), "smart");
+});
+
+test("classification uses one semantic settings snapshot across hot reload", async () => {
+  let classifierCalls = 0;
+  let releaseClassifier!: () => void;
+  let markClassifierStarted!: () => void;
+  const classifierStarted = new Promise<void>((resolve) => {
+    markClassifierStarted = resolve;
+  });
+  const classifierRelease = new Promise<void>((resolve) => {
+    releaseClassifier = resolve;
+  });
+  const handlers = createHarness({
+    useCases: readOnlyUseCases,
+    stream: async function* () {
+      classifierCalls += 1;
+      if (classifierCalls === 1) {
+        markClassifierStarted();
+        await classifierRelease;
+        yield* textStream("use-case:read-only");
+        return;
+      }
+      yield* textStream("hard.");
+    },
+  });
+  const firstMessage = { role: "user", content: "Show ADO PR 81522 details", source: { kind: "user" } };
+  const firstAgent = { id: "in-flight-use-case", session: { deriveMessages: () => [firstMessage] } };
+
+  const inFlightClassification = handlers.get("agent/pre-step")?.(
+    { agent: firstAgent, messages: [firstMessage] },
+    () => undefined,
+  );
+  await classifierStarted;
+  handlers.updateUseCases?.({ enabled: false, rules: [] });
+  releaseClassifier();
+  await inFlightClassification;
+
+  assert.equal(handlers.modelRouter.getCurrentTier(firstAgent.id), "fast");
+  assert.equal(
+    handlers.modelRouter.getState(firstAgent.id)?.lastMatchedUseCaseId,
+    "read-only",
+  );
+
+  const secondMessage = { role: "user", content: "Show ADO PR 81522 details", source: { kind: "user" } };
+  const secondAgent = { id: "after-in-flight-reload", session: { deriveMessages: () => [secondMessage] } };
+  await handlers.get("agent/pre-step")?.({ agent: secondAgent, messages: [secondMessage] }, () => undefined);
+
+  assert.equal(handlers.modelRouter.getCurrentTier(secondAgent.id), "smart");
+  assert.equal(handlers.modelRouter.getState(secondAgent.id)?.lastMatchedUseCaseId, null);
 });
 
 test("semantic use-case records initial reason without locking tier", async () => {
