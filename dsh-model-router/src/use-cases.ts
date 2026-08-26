@@ -120,15 +120,18 @@ export function explicitStrongerTier(message: string): "medium" | "smart" | null
   const intent = /\b(?:use|choose|force|route|switch|select|pick|send|move|run|set|escalat(?:e|ed|ing|ion))\b(?:\s+(?!(?:not|never|don't|dont|do)\b)[\w'-]+){0,8}\s+(smart|medium)(?:\s+(?:model|tier))?\b/g;
   let mediumRequested = false;
   for (const match of text.matchAll(intent)) {
-    const before = text.slice(0, match.index ?? 0);
-    if (/\b(?:don't|dont|never|not)\s*$/.test(before) || /\bdo\s+not\s*$/.test(before)) continue;
+    if (isNegatedAt(text, match.index ?? 0)) continue;
     if (match[1] === "smart") return "smart";
     mediumRequested = true;
   }
   if (mediumRequested) return "medium";
-  if (/\bescalat(?:e|ed|ing|ion)\b/.test(text) &&
-    !/(?:\b(?:don't|dont|never|not)\s*$|\bdo\s+not\s*$)/.test(text)) {
-    return "medium";
+  for (const match of text.matchAll(/\bescalat(?:e|ed|ing|ion)\b/g)) {
+    if (!isNegatedAt(text, match.index ?? 0)) return "medium";
   }
   return null;
+}
+
+function isNegatedAt(text: string, index: number): boolean {
+  const clause = text.slice(0, index).split(/[;,.!?]|\b(?:and|but)\b/).at(-1) ?? "";
+  return /\b(?:don't|dont|never|not)\b|\bdo\s+not\b/.test(clause);
 }
