@@ -36,6 +36,77 @@ test("post-execute accepts DSH's exec, result, next signature", async () => {
   assert.equal(handlers.has("tools/result"), false);
 });
 
+test("caps redundant Bash escalation retries across smart tiers", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const cancellations: unknown[] = [];
+  const agent = {
+    id: "agent-1",
+    cancel(cause: unknown) { cancellations.push(cause); },
+  };
+  const ctx = {
+    modelRouter: {
+      isLocalGuardrailsEnabled() { return false; },
+    },
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  };
+
+  apply(ctx as any, {
+    enableRetries: false,
+    enableSystemPromptHint: false,
+    forceAlways: false,
+  });
+
+  const postExecute = handlers.get("tools/post-execute");
+  const turnEnd = handlers.get("turn/end");
+  assert.ok(postExecute);
+  assert.ok(turnEnd);
+  const exec = {
+    agent,
+    name: "Bash",
+    arguments: {
+      command: "git status --short",
+      sandbox_permissions: "danger-full-access",
+    },
+  };
+  const result = {
+    isError: true,
+    error: {
+      message:
+        'sandbox escalation to "danger-full-access" is not strictly wider than this call\'s current "danger-full-access" mode',
+    },
+  };
+  const downstream = {
+    kind: "accept",
+    additionalContexts: [{ role: "user", content: "keep me" }],
+  };
+
+  const first = await postExecute(exec, result, async () => downstream) as any;
+  assert.equal(cancellations.length, 0);
+  assert.equal(first.additionalContexts.length, 2);
+  assert.deepEqual(first.additionalContexts[0], downstream.additionalContexts[0]);
+  assert.match(
+    JSON.stringify(first.additionalContexts[1]),
+    /without sandbox_permissions or justification/,
+  );
+
+  await postExecute(exec, result, async () => ({ kind: "accept" }));
+  assert.deepEqual(cancellations, [{
+    kind: "hook",
+    reason: "repeated-redundant-bash-sandbox-escalation",
+  }]);
+
+  await turnEnd({ agent });
+  const nextTurn = await postExecute(
+    exec,
+    result,
+    async () => ({ kind: "accept" }),
+  ) as any;
+  assert.equal(cancellations.length, 1);
+  assert.equal(nextTurn.additionalContexts.length, 1);
+});
+
 test("repeated tools add recovery to the pre-step decision", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let inboxInjections = 0;

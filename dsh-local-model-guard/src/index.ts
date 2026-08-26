@@ -256,6 +256,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       s = {
         consecutiveFailures: 0,
         recentSignatures: [],
+        redundantBashEscalations: 0,
         askCallsThisStep: 0,
         recentToolFailures: 0,
       };
@@ -303,18 +304,22 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
     }
   }
 
-  function createRecoveryMessage(reason: string) {
+  function createGuardMessage(text: string) {
     return {
       id: randomUUID(),
       role: "user" as const,
       content: [
         {
           type: "text" as const,
-          text: `${config.recoveryMessage}\n(Reason: ${reason})`,
+          text,
         },
       ],
       source: { kind: "plugin" as const, plugin: name },
     };
+  }
+
+  function createRecoveryMessage(reason: string) {
+    return createGuardMessage(`${config.recoveryMessage}\n(Reason: ${reason})`);
   }
 
   async function compactForContextPressure(
@@ -454,12 +459,18 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
   ctx.on("tools/post-execute" as any, async (exec: any, result: any, next: any) => {
     try {
       if (result && typeof result === "object") {
-        const agentId = exec?.agentId ?? result?.agentId ?? "default";
+        const agentId =
+          exec?.agentId ?? exec?.agent?.id ?? result?.agentId ?? "default";
         const toolName = String(
           exec?.name ?? exec?.toolName ?? exec?.tool?.name ?? "",
         );
         const failure = result?.error ?? result?.failure;
         const failureCode = String(failure?.code ?? result?.code ?? "");
+        const redundantBashEscalation =
+          toolName === "Bash" &&
+          Boolean(result?.isError ?? result?.error ?? result?.failed) &&
+          /^sandbox escalation to .+ is not strictly wider than this call's current .+ mode$/i
+            .test(String(failure?.message ?? result?.message ?? "").trim());
 
         if (toolName === "ask_user_question" && failureCode === "ASK_ABORTED") {
           return await next();
@@ -508,6 +519,35 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
           ...result,
           agentId: exec?.agentId ?? result?.agentId,
         });
+
+        const decision = await next();
+        if (!redundantBashEscalation) return decision;
+
+        const guardState = getOrCreate(agentId);
+        guardState.redundantBashEscalations += 1;
+        if (guardState.redundantBashEscalations === 1) {
+          emitGuardEvent(agentId, "redundant-sandbox-escalation", {
+            toolName,
+          });
+          return {
+            ...decision,
+            additionalContexts: [
+              ...(decision?.additionalContexts ?? []),
+              createGuardMessage(
+                "The Bash command did not run because the requested sandbox escalation was redundant. Retry the exact command once without sandbox_permissions or justification.",
+              ),
+            ],
+          };
+        }
+
+        exec?.agent?.cancel?.({
+          kind: "hook",
+          reason: "repeated-redundant-bash-sandbox-escalation",
+        });
+        emitGuardEvent(agentId, "sandbox-escalation-loop-cancelled", {
+          toolName,
+        });
+        return decision;
       }
       return await next();
     } catch (err) {
@@ -764,6 +804,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       s.emptyResponseRecoveryAttempted = false;
       s.contextOverflowRecoveryAttempted = false;
       s.contextPressureCompactionAttempted = false;
+      s.redundantBashEscalations = 0;
       // Decay recent failure counter each turn
       s.recentToolFailures = Math.max(0, s.recentToolFailures - 1);
     } catch {

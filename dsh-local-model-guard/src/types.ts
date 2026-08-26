@@ -42,6 +42,8 @@ export interface LocalGuardConfig {
 export interface GuardState {
   consecutiveFailures: number;
   recentSignatures: string[];
+  /** Redundant Bash sandbox escalations attempted in the current turn. */
+  redundantBashEscalations: number;
   /** Number of ask_user_question calls attempted in the current model step. */
   askCallsThisStep: number;
   lastInterventionAt?: number;
