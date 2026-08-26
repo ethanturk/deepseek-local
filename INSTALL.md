@@ -105,6 +105,51 @@ model-router:
     model: your-fast-model-id
 ```
 
+Semantic use-case routing is configured in this same settings file and is
+disabled by default:
+
+```yaml
+model-router:
+  useCases:
+    enabled: false
+    rules: []
+```
+
+To enable the read-only rule, use an LLM classifier (`mode: llm` or
+`mode: both`) with its provider and model configured. Heuristic-only mode is
+rejected while rules are active. This is an enabled, read-only example:
+
+```yaml
+model-router:
+  classifier:
+    mode: both
+    provider: local
+    model: your-fast-model-id
+  useCases:
+    enabled: true
+    rules:
+      - id: read-only
+        tierId: fast
+        description: >
+          Retrieve or display existing information without analysis,
+          judgment, recommendations, or mutation.
+        positiveExamples:
+          - Read src/index.ts
+          - Show ADO PR 81522 details
+          - "I'll paginate through the threads"
+        negativeExamples:
+          - Review PR 81522
+          - Analyze src/index.ts
+          - Comment on PR 81522
+          - Modify src/index.ts
+```
+
+Rules are ordered, and a match applies only when the full request clearly fits
+the rule. Explicit stronger-tier requests take precedence. Ambiguous or
+malformed classifier output uses normal complexity routing, and validation or
+recovery may still escalate the turn. Keep this operational configuration in
+`settings.yaml`; the patch YAML only loads the plugin.
+
 Minimum agent checklist:
 
 1. List configured providers in the running Harness (UI or settings files).  

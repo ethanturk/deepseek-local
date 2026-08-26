@@ -11,6 +11,7 @@ Inspired by NVIDIA NeMo Switchyard (LLM classifier + escalation), implemented as
 | Tiers | 3: `fast` → `medium` → `smart` |
 | Classifier | Conservative heuristic + LLM (`mode: "both"` keeps the more complex result) |
 | When to classify | Every new user message, using recent conversation context |
+| Semantic use cases | Ordered rules may choose the initial tier before complexity routing; disabled by default and never lock later escalation |
 | When to validate | After a turn ends |
 | On validation fail | Re-generate last assistant response on a higher tier |
 | Stickiness | Configurable; default = current turn |
@@ -65,6 +66,41 @@ model-router:
     provider: local
     model: your-fast-local-model-id
 ```
+
+## Semantic use-case settings
+
+Semantic use cases are configured in the live `model-router` section of
+`~/.dsh/settings.yaml`. This read-only rule is copyable and disabled by
+default:
+
+```yaml
+model-router:
+  useCases:
+    enabled: false
+    rules:
+      - id: read-only
+        tierId: fast
+        description: >
+          Retrieve or display existing information without analysis,
+          judgment, recommendations, or mutation.
+        positiveExamples:
+          - Read src/index.ts
+          - Show ADO PR 81522 details
+          - "I'll paginate through the threads"
+        negativeExamples:
+          - Review PR 81522
+          - Analyze src/index.ts
+          - Comment on PR 81522
+          - Modify src/index.ts
+```
+
+Set `useCases.enabled` to `true` only with `classifier.mode: llm` or
+`classifier.mode: both`, and provide that classifier's `provider` and `model`.
+Active rules are rejected in heuristic-only mode. Rules are evaluated in order,
+and a rule matches only when the full current request clearly fits it. An
+explicit stronger-tier request wins; ambiguous or malformed classifier output
+falls through to normal complexity routing. Validation and recovery can still
+escalate a matched turn.
 
 Optional `reasoningEffort` values belong on tier entries in DSH settings. It is an adapter-owned opaque id (e.g. `off`, `low`, `medium`, `high`, `max`).
 It is written into ModelSelection and onto `agent/request` options when those seams exist.
