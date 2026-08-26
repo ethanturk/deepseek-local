@@ -130,7 +130,7 @@ export function explicitStrongerTier(message: string): "medium" | "smart" | null
 }
 
 function isExcludedIntent(intent: string): boolean {
-  return /\b(?:anything|everything|all)\s+but\b|\bexcept\b|\bother\s+than\b/.test(intent);
+  return /\b(?:anything|everything|all)\s+but\b|\b(?:no|besides|neither|except)\b|\bother\s+than\b/.test(intent);
 }
 
 function isNegatedAt(text: string, index: number): boolean {

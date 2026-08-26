@@ -205,6 +205,9 @@ for (const request of [
   "Route this to anything but medium",
   "Choose any tier except medium",
   "Run this on a model other than medium",
+  "Use no smart model",
+  "Use besides smart",
+  "Use neither smart nor medium",
 ]) {
   test(`excluded tier is not affirmative intent: ${request}`, () => {
     assert.equal(explicitStrongerTier(request), null);
@@ -214,4 +217,5 @@ for (const request of [
 test("affirmative tier intent still wins when another tier is excluded", () => {
   assert.equal(explicitStrongerTier("Use smart, not medium"), "smart");
   assert.equal(explicitStrongerTier("Use anything but smart; use medium"), "medium");
+  assert.equal(explicitStrongerTier("Use no smart; use medium"), "medium");
 });
