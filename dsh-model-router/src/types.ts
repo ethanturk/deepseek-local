@@ -44,6 +44,19 @@ export interface ValidatorConfig {
   stickyScope: StickyScope;
 }
 
+export interface UseCaseRule {
+  id: string;
+  tierId: TierId;
+  description: string;
+  positiveExamples: string[];
+  negativeExamples: string[];
+}
+
+export interface UseCasesConfig {
+  enabled: boolean;
+  rules: UseCaseRule[];
+}
+
 export interface VirtualModelConfig {
   id: string;
   displayName: string;
@@ -53,6 +66,7 @@ export interface ModelRouterConfig {
   tiers: [TierConfig, TierConfig, TierConfig]; // ordered fast → medium → smart
   classifier: ClassifierConfig;
   validator: ValidatorConfig;
+  useCases: UseCasesConfig;
   virtualModel: VirtualModelConfig;
   enableSystemPromptHint: boolean;
 }
@@ -121,6 +135,10 @@ export const DEFAULT_CONFIG: ModelRouterConfig = {
     alwaysUseTierId: "smart",
     maxEscalations: 2,
     stickyScope: "turn",
+  },
+  useCases: {
+    enabled: false,
+    rules: [],
   },
   virtualModel: {
     id: "auto-tier",

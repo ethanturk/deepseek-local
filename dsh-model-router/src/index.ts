@@ -31,6 +31,7 @@ import {
 } from "@deepseek-ai/dsh-settings";
 import {
   type Complexity,
+  type UseCasesConfig,
   type ModelRouterConfig,
   type ModelRouterService,
   type RouterState,
@@ -38,6 +39,7 @@ import {
   DEFAULT_CONFIG,
 } from "./types.ts";
 import { classifyHeuristic } from "./heuristic.ts";
+import { assertValidUseCases } from "./use-cases.ts";
 
 export const name = "dsh-model-router";
 export const inject = ["llm", "systemPrompt", "tools", "sessions", "agents", "settings"];
@@ -52,6 +54,14 @@ const tierSchema = z.object({
   reasoningEffort: z.string(),
 });
 
+const useCaseRuleSchema = z.object({
+  id: z.string().required(),
+  tierId: z.union([z.const("fast"), z.const("medium"), z.const("smart")]).required(),
+  description: z.string().required(),
+  positiveExamples: z.array(z.string()).required(),
+  negativeExamples: z.array(z.string()).required(),
+});
+
 export const MODEL_ROUTER_SETTINGS_SCHEMA = z.object({
   tiers: z.array(tierSchema).required(),
   classifier: z.object({
@@ -64,6 +74,10 @@ export const MODEL_ROUTER_SETTINGS_SCHEMA = z.object({
     maxEscalations: z.number().required(),
     stickyScope: z.union([z.const("turn"), z.const("session")]).required(),
   }).required(),
+  useCases: z.object({
+    enabled: z.boolean().required(),
+    rules: z.array(useCaseRuleSchema).required(),
+  }).required(),
   virtualModel: z.object({
     id: z.string().required(),
     displayName: z.string().required(),
@@ -71,7 +85,9 @@ export const MODEL_ROUTER_SETTINGS_SCHEMA = z.object({
   enableSystemPromptHint: z.boolean().required(),
 });
 
-type ModelRouterPluginConfig = Omit<Partial<ModelRouterConfig>, "tiers">;
+type ModelRouterPluginConfig = Omit<Partial<ModelRouterConfig>, "tiers" | "useCases"> & {
+  useCases?: Partial<UseCasesConfig>;
+};
 
 /** Merge non-tier composition config over local-only defaults. */
 function resolveConfig(raw?: ModelRouterPluginConfig): ModelRouterConfig {
@@ -82,6 +98,11 @@ function resolveConfig(raw?: ModelRouterPluginConfig): ModelRouterConfig {
     tiers: DEFAULT_CONFIG.tiers,
     classifier: { ...DEFAULT_CONFIG.classifier, ...raw.classifier },
     validator: { ...DEFAULT_CONFIG.validator, ...raw.validator },
+    useCases: {
+      ...DEFAULT_CONFIG.useCases,
+      ...raw.useCases,
+      rules: raw.useCases?.rules ?? DEFAULT_CONFIG.useCases.rules,
+    },
     virtualModel: { ...DEFAULT_CONFIG.virtualModel, ...raw.virtualModel },
   };
 }
@@ -182,6 +203,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
         if (ids.join(",") !== "fast,medium,smart") {
           throw new Error("model-router tiers must be ordered fast, medium, smart");
         }
+        assertValidUseCases(value.useCases, value.classifier, value.tiers.map((tier) => tier.id));
       },
     },
   );
