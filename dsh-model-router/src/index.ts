@@ -39,7 +39,13 @@ import {
   DEFAULT_CONFIG,
 } from "./types.ts";
 import { classifyHeuristic } from "./heuristic.ts";
-import { assertValidUseCases } from "./use-cases.ts";
+import {
+  assertValidUseCases,
+  buildClassifierPrompt,
+  type ClassifierDecision,
+  explicitStrongerTier,
+  parseClassifierDecision,
+} from "./use-cases.ts";
 
 export const name = "dsh-model-router";
 export const inject = ["llm", "systemPrompt", "tools", "sessions", "agents", "settings"];
@@ -222,6 +228,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
         currentTierId: "medium",
         escalationCount: 0,
         lastClassification: null,
+        lastMatchedUseCaseId: null,
         lastValidation: null,
         stickyUntil: null,
         pendingRegenerate: false,
@@ -343,26 +350,17 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
   async function classifyWithLlm(
     message: string,
     conversation: string,
-  ): Promise<Complexity | null> {
+  ): Promise<ClassifierDecision | null> {
     const { provider, model } = config.classifier;
     if (!provider || !model) return null;
 
     try {
-      const prompt = `Classify the difficulty of the current user request using the recent conversation for context.
-Reply with exactly one word: simple, medium, or hard.
-
-Recent conversation:
-${conversation.slice(-3000)}
-
-Current request:
-${message.slice(0, 2000)}`;
-
-      const text = (await generateText(provider, model, prompt, 8)).toLowerCase();
-
-      if (text.includes("hard")) return "hard";
-      if (text.includes("medium")) return "medium";
-      if (text.includes("simple")) return "simple";
-      return null;
+      const prompt = buildClassifierPrompt(message, conversation, config.useCases);
+      const maxTokens = config.useCases.enabled && config.useCases.rules.length > 0
+        ? 80
+        : 8;
+      const text = await generateText(provider, model, prompt, maxTokens);
+      return parseClassifierDecision(text, config.useCases);
     } catch (err) {
       console.warn("[dsh-model-router] LLM classifier failed", err);
       return null;
@@ -373,22 +371,34 @@ ${message.slice(0, 2000)}`;
     message: string,
     context?: { hasFiles?: boolean; recentToolFailures?: number },
     conversation = message,
-  ): Promise<Complexity> {
+  ): Promise<ClassifierDecision> {
+    const explicitTier = explicitStrongerTier(message);
+    if (explicitTier) {
+      return {
+        kind: "complexity",
+        complexity: explicitTier === "smart" ? "hard" : "medium",
+      };
+    }
+
     const mode = config.classifier.mode;
     const heuristic = classifyHeuristic(message, context);
 
-    if (mode === "heuristic") return heuristic;
+    if (mode === "heuristic") return { kind: "complexity", complexity: heuristic };
 
     if (mode === "llm" || mode === "both") {
       const llmResult = await classifyWithLlm(message, conversation);
+      if (llmResult?.kind === "use-case") return llmResult;
       if (llmResult && mode === "both") {
-        return higherComplexity(heuristic, llmResult);
+        return {
+          kind: "complexity",
+          complexity: higherComplexity(heuristic, llmResult.complexity),
+        };
       }
       if (llmResult) return llmResult;
-      if (mode === "both") return heuristic;
+      if (mode === "both") return { kind: "complexity", complexity: heuristic };
     }
 
-    return "medium";
+    return { kind: "complexity", complexity: "medium" };
   }
 
   // ---------- Validator (smart tier judge) ----------
@@ -671,21 +681,39 @@ ${assistantResponse.slice(0, 3000)}`;
             conversationMessages,
             conversationUserIndex,
           );
-          const complexity = await classifyMessage(userText, {
+          const decision = await classifyMessage(userText, {
             recentToolFailures: s.recentToolFailures ?? 0,
             hasFiles: /\b[\w.-]+\.(ts|tsx|js|jsx|py|go|rs|java|cpp|h|css|json|yaml|yml|md)\b/i.test(conversation),
           }, conversation);
-          const tierId = complexityToTier(complexity);
-          s.lastClassification = complexity;
+          const tierId = decision.kind === "use-case"
+            ? decision.tierId
+            : complexityToTier(decision.complexity);
+          s.lastClassification = decision.kind === "complexity"
+            ? decision.complexity
+            : null;
+          s.lastMatchedUseCaseId = decision.kind === "use-case"
+            ? decision.useCaseId
+            : null;
           s.currentTierId = tierId;
           s.lastUserMessage = userText;
           s.escalationCount = 0;
 
-          emitDecision(agentId, "classify", {
-            complexity,
-            tierId,
-            messagePreview: userText.slice(0, 120),
-          });
+          emitDecision(
+            agentId,
+            "classify",
+            decision.kind === "use-case"
+              ? {
+                reason: "use-case",
+                useCaseId: decision.useCaseId,
+                tierId,
+                messagePreview: userText.slice(0, 120),
+              }
+              : {
+                complexity: decision.complexity,
+                tierId,
+                messagePreview: userText.slice(0, 120),
+              },
+          );
         } else if (keepInheritedTier) {
           s.lastUserMessage = userText;
         }

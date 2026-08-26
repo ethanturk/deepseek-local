@@ -75,6 +75,7 @@ export interface RouterState {
   currentTierId: TierId;
   escalationCount: number;
   lastClassification: Complexity | null;
+  lastMatchedUseCaseId: string | null;
   lastValidation: { passed: boolean; reason?: string } | null;
   stickyUntil: "end-of-turn" | "end-of-session" | null;
   /** When true, the next step must re-generate the previous assistant response on a higher tier. */

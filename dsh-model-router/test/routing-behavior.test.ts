@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { apply as applyRouter } from "../src/index.ts";
+import type { UseCasesConfig } from "../src/types.ts";
 
 type Handler = (payload: any, next?: () => unknown) => unknown;
 type TestHandlers = Map<string, Handler> & {
   adapter?: any;
   modelRouter?: any;
+  updateUseCases?: (useCases: UseCasesConfig) => void;
 };
 
 function createHarness(options: {
@@ -19,8 +21,11 @@ function createHarness(options: {
   ) => Promise<Record<string, unknown>>;
   activeAgentId?: string;
   parentAgentId?: string;
+  useCases?: UseCasesConfig;
+  sessionEvents?: Record<string, unknown>[];
 }) {
   const handlers = new Map<string, Handler>() as TestHandlers;
+  let settingsWatcher: (() => void) | undefined;
   const settings = {
     tiers: [
       {
@@ -52,8 +57,10 @@ function createHarness(options: {
       maxEscalations: 2,
       stickyScope: "turn",
     },
+    useCases: options.useCases ?? { enabled: false, rules: [] },
   };
   const ctx = {
+    fiber: { state: 0 },
     agents: {
       currentAgent: () => options.activeAgentId
         ? { id: options.activeAgentId }
@@ -79,12 +86,18 @@ function createHarness(options: {
     provide(service: string, implementation: unknown) {
       if (service === "modelRouter") handlers.modelRouter = implementation;
     },
-    sessions: {},
+    sessions: {
+      appendEvent(event: Record<string, unknown>) {
+        options.sessionEvents?.push(event);
+      },
+    },
     settings: {
       register() {
         return {
           get: () => settings,
-          watch() {},
+          watch(callback: () => void) {
+            settingsWatcher = callback;
+          },
         };
       },
     },
@@ -93,6 +106,10 @@ function createHarness(options: {
   };
 
   applyRouter(ctx as never);
+  handlers.updateUseCases = (useCases) => {
+    settings.useCases = useCases;
+    settingsWatcher?.();
+  };
   return handlers;
 }
 
@@ -624,6 +641,229 @@ test("classifier warnings preserve provider finish error details", async () => {
   const warningText = warnings.flat().map(String).join(" ");
   assert.match(warningText, /token_expired/);
   assert.match(warningText, /Provided authentication token is expired\./);
+});
+
+const readOnlyUseCases: UseCasesConfig = {
+  enabled: true,
+  rules: [{
+    id: "read-only",
+    tierId: "fast",
+    description: "Read or paginate existing information without analysis or changes.",
+    positiveExamples: ["Read src/index.ts", "Show ADO PR 81522 details"],
+    negativeExamples: ["Review implementation after reading PR details"],
+  }],
+};
+
+for (const [index, request] of [
+  "Read src/index.ts",
+  "Show ADO PR 81522 details",
+  "I'll paginate through the threads",
+].entries()) {
+  test(`semantic use-case starts read-only request ${index + 1} on fast`, async () => {
+    const events: Record<string, unknown>[] = [];
+    let classifierMaxTokens = 0;
+    const handlers = createHarness({
+      useCases: readOnlyUseCases,
+      sessionEvents: events,
+      stream: async function* (options) {
+        classifierMaxTokens = options.maxTokens;
+        yield* textStream("use-case:read-only");
+      },
+    });
+    const message = { role: "user", content: request, source: { kind: "user" } };
+    const agent = {
+      id: `semantic-read-only-${index}`,
+      session: { deriveMessages: () => [message] },
+    };
+
+    await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+    assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "fast");
+    assert.equal(
+      handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId,
+      "read-only",
+    );
+    assert.ok(events.some((event) =>
+      event.type === "model-router/classify" &&
+      event.reason === "use-case" &&
+      event.useCaseId === "read-only" &&
+      event.tierId === "fast"
+    ));
+    assert.ok(classifierMaxTokens > 8);
+  });
+}
+
+test("disabled semantic use cases preserve legacy classifier behavior", async () => {
+  const events: Record<string, unknown>[] = [];
+  let classifierCalls = 0;
+  let classifierPrompt = "";
+  let classifierMaxTokens = 0;
+  const handlers = createHarness({
+    useCases: { ...readOnlyUseCases, enabled: false },
+    sessionEvents: events,
+    stream: async function* (options) {
+      classifierCalls += 1;
+      classifierPrompt = modelPrompt(options) ?? "";
+      classifierMaxTokens = options.maxTokens;
+      yield* textStream("use-case:read-only");
+    },
+  });
+  const message = { role: "user", content: "Read src/index.ts", source: { kind: "user" } };
+  const agent = { id: "disabled-use-case", session: { deriveMessages: () => [message] } };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+  assert.doesNotMatch(classifierPrompt, /use-case:read-only/);
+  assert.equal(classifierCalls, 1);
+  assert.equal(classifierMaxTokens, 8);
+  assert.equal(handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId, null);
+  const classification = events.find((event) => event.type === "model-router/classify");
+  assert.ok(classification);
+  const { ts: _ts, ...eventWithoutTimestamp } = classification;
+  assert.deepEqual(eventWithoutTimestamp, {
+    type: "model-router/classify",
+    agentId: agent.id,
+    complexity: "simple",
+    tierId: "fast",
+    messagePreview: "Read src/index.ts",
+  });
+});
+
+test("unknown semantic use case falls back to both-mode heuristic", async () => {
+  const handlers = createHarness({
+    useCases: readOnlyUseCases,
+    stream: async function* () {
+      yield* textStream("use-case:unknown");
+    },
+  });
+  const message = { role: "user", content: "Show ADO PR 81522 details", source: { kind: "user" } };
+  const agent = { id: "unknown-use-case", session: { deriveMessages: () => [message] } };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "fast");
+  assert.equal(handlers.modelRouter.getState(agent.id)?.lastClassification, "simple");
+  assert.equal(handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId, null);
+});
+
+test("explicit smart-tier request outranks semantic use-case match", async () => {
+  const handlers = createHarness({
+    useCases: readOnlyUseCases,
+    stream: async function* () {
+      yield* textStream("use-case:read-only");
+    },
+  });
+  const message = {
+    role: "user",
+    content: "Use the smart model to read PR 81522",
+    source: { kind: "user" },
+  };
+  const agent = { id: "explicit-smart-use-case", session: { deriveMessages: () => [message] } };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "smart");
+  assert.equal(handlers.modelRouter.getState(agent.id)?.lastClassification, "hard");
+  assert.equal(handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId, null);
+});
+
+test("mixed semantic request uses complexity and includes negative examples", async () => {
+  let classifierPrompt = "";
+  const handlers = createHarness({
+    useCases: readOnlyUseCases,
+    stream: async function* (options) {
+      classifierPrompt = modelPrompt(options) ?? "";
+      yield* textStream("medium");
+    },
+  });
+  const message = {
+    role: "user",
+    content: "Read PR 81522 and review the implementation",
+    source: { kind: "user" },
+  };
+  const agent = { id: "mixed-use-case", session: { deriveMessages: () => [message] } };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "medium");
+  assert.equal(handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId, null);
+  assert.match(classifierPrompt, /Review implementation after reading PR details/);
+});
+
+for (const complexity of ["medium", "hard"] as const) {
+  test(`${complexity} complexity clears previous semantic use-case match`, async () => {
+    let classifierResponse = "use-case:read-only";
+    let messages = [{ role: "user", content: "Show ADO PR 81522 details", source: { kind: "user" } }];
+    const handlers = createHarness({
+      useCases: readOnlyUseCases,
+      stream: async function* () {
+        yield* textStream(classifierResponse);
+      },
+    });
+    const agent = { id: `clear-use-case-${complexity}`, session: { deriveMessages: () => messages } };
+    await handlers.get("agent/pre-step")?.({ agent, messages }, () => undefined);
+    assert.equal(handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId, "read-only");
+
+    classifierResponse = complexity;
+    messages = [
+      ...messages,
+      { role: "assistant", content: "PR details." } as any,
+      { role: "user", content: "Review the implementation carefully", source: { kind: "user" } },
+    ];
+    await handlers.get("agent/pre-step")?.({ agent, messages }, () => undefined);
+
+    assert.equal(handlers.modelRouter.getCurrentTier(agent.id), complexity === "hard" ? "smart" : "medium");
+    assert.equal(handlers.modelRouter.getState(agent.id)?.lastClassification, complexity);
+    assert.equal(handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId, null);
+  });
+}
+
+test("hot reload enables semantic routing without reapplying plugin", async () => {
+  const handlers = createHarness({
+    useCases: { enabled: false, rules: [] },
+    stream: async function* (options) {
+      yield* textStream(
+        (modelPrompt(options) ?? "").includes("use-case:read-only")
+          ? "use-case:read-only"
+          : "hard",
+      );
+    },
+  });
+  const firstMessage = { role: "user", content: "Show ADO PR 81522 details", source: { kind: "user" } };
+  const firstAgent = { id: "before-use-case-reload", session: { deriveMessages: () => [firstMessage] } };
+  await handlers.get("agent/pre-step")?.({ agent: firstAgent, messages: [firstMessage] }, () => undefined);
+  assert.equal(handlers.modelRouter.getCurrentTier(firstAgent.id), "smart");
+
+  handlers.updateUseCases?.(readOnlyUseCases);
+  const secondMessage = { role: "user", content: "Show ADO PR 81522 details", source: { kind: "user" } };
+  const secondAgent = { id: "after-use-case-reload", session: { deriveMessages: () => [secondMessage] } };
+  await handlers.get("agent/pre-step")?.({ agent: secondAgent, messages: [secondMessage] }, () => undefined);
+
+  assert.equal(handlers.modelRouter.getCurrentTier(secondAgent.id), "fast");
+  assert.equal(handlers.modelRouter.getState(secondAgent.id)?.lastMatchedUseCaseId, "read-only");
+  assert.equal(handlers.modelRouter.getCurrentTier(firstAgent.id), "smart");
+});
+
+test("semantic use-case records initial reason without locking tier", async () => {
+  const handlers = createHarness({
+    useCases: readOnlyUseCases,
+    stream: async function* () {
+      yield* textStream("use-case:read-only");
+    },
+  });
+  const message = { role: "user", content: "Show ADO PR 81522 details", source: { kind: "user" } };
+  const agent = { id: "escalated-use-case", session: { deriveMessages: () => [message] } };
+  await handlers.get("agent/pre-step")?.({ agent, messages: [message] }, () => undefined);
+
+  assert.equal(
+    handlers.modelRouter.escalateTier(agent.id, "read result needs more reasoning"),
+    "medium",
+  );
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "medium");
+  assert.equal(
+    handlers.modelRouter.getState(agent.id)?.lastMatchedUseCaseId,
+    "read-only",
+  );
 });
 
 test("router diagnostics use stderr rather than the protocol stdout channel", () => {
