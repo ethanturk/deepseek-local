@@ -22,6 +22,7 @@ function createHarness(options: {
   activeAgentId?: string;
   parentAgentId?: string;
   useCases?: UseCasesConfig;
+  compositionUseCases?: UseCasesConfig;
   sessionEvents?: Record<string, unknown>[];
 }) {
   const handlers = new Map<string, Handler>() as TestHandlers;
@@ -57,7 +58,7 @@ function createHarness(options: {
       maxEscalations: 2,
       stickyScope: "turn",
     },
-    useCases: options.useCases ?? { enabled: false, rules: [] },
+    useCases: options.useCases ?? options.compositionUseCases ?? { enabled: false, rules: [] },
   };
   const ctx = {
     fiber: { state: 0 },
@@ -105,7 +106,12 @@ function createHarness(options: {
     tools: {},
   };
 
-  applyRouter(ctx as never);
+  applyRouter(
+    ctx as never,
+    options.compositionUseCases
+      ? { useCases: options.compositionUseCases } as never
+      : undefined,
+  );
   handlers.updateUseCases = (useCases) => {
     settings.useCases = useCases;
     settingsWatcher?.();
@@ -653,6 +659,35 @@ const readOnlyUseCases: UseCasesConfig = {
     negativeExamples: ["Review implementation after reading PR details"],
   }],
 };
+
+test("live settings replace composition semantic rule arrays", async () => {
+  const archiveRule = {
+    ...readOnlyUseCases.rules[0],
+    id: "archive-only",
+    description: "Retrieve archived information without analysis or changes.",
+  };
+  const prompts: string[] = [];
+  const handlers = createHarness({
+    compositionUseCases: readOnlyUseCases,
+    stream: async function* (options) {
+      prompts.push(modelPrompt(options) ?? "");
+      yield* textStream("medium");
+    },
+  });
+  const firstMessage = { role: "user", content: "Read src/index.ts", source: { kind: "user" } };
+  const firstAgent = { id: "composition-rules", session: { deriveMessages: () => [firstMessage] } };
+  await handlers.get("agent/pre-step")?.({ agent: firstAgent, messages: [firstMessage] }, () => undefined);
+
+  handlers.updateUseCases?.({ enabled: true, rules: [archiveRule] });
+  const secondMessage = { role: "user", content: "Read archive", source: { kind: "user" } };
+  const secondAgent = { id: "settings-rules", session: { deriveMessages: () => [secondMessage] } };
+  await handlers.get("agent/pre-step")?.({ agent: secondAgent, messages: [secondMessage] }, () => undefined);
+
+  assert.match(prompts[0], /use-case:read-only/);
+  assert.doesNotMatch(prompts[0], /use-case:archive-only/);
+  assert.match(prompts[1], /use-case:archive-only/);
+  assert.doesNotMatch(prompts[1], /use-case:read-only/);
+});
 
 for (const [index, request] of [
   "Read src/index.ts",

@@ -37,9 +37,6 @@ export function assertValidUseCases(
     if (!rule.positiveExamples.length) {
       throw new Error(`semantic use-case "${rule.id}" requires at least one positive example`);
     }
-    if (!rule.negativeExamples.length) {
-      throw new Error(`semantic use-case "${rule.id}" requires at least one negative example`);
-    }
     rule.positiveExamples.forEach((example) => {
       assertTrimmed(example, `semantic use-case "${rule.id}" positive examples`);
     });
@@ -86,6 +83,7 @@ export function buildClassifierPrompt(
   return `Classify the difficulty of the current user request using the recent conversation for context.
 Reply with exactly one response line: use-case:<id>, simple, medium, or hard.
 A use case applies only when the entire current request fits that use case. If uncertain or the request includes additional work, return a complexity label.
+If multiple rules match, return the first configured matching rule.
 
 Ordered semantic use-case rules:
 ${rules}
@@ -120,7 +118,7 @@ export function explicitStrongerTier(message: string): "medium" | "smart" | null
   const intent = /\b(?:use|choose|force|route|switch|select|pick|send|move|run|set|escalat(?:e|ed|ing|ion))\b(?:\s+(?!(?:not|never|don't|dont|do)\b)[\w'-]+){0,8}\s+(smart|medium)(?:\s+(?:model|tier))?\b/g;
   let mediumRequested = false;
   for (const match of text.matchAll(intent)) {
-    if (isNegatedAt(text, match.index ?? 0)) continue;
+    if (isNegatedAt(text, match.index ?? 0) || isExcludedIntent(match[0])) continue;
     if (match[1] === "smart") return "smart";
     mediumRequested = true;
   }
@@ -129,6 +127,10 @@ export function explicitStrongerTier(message: string): "medium" | "smart" | null
     if (!isNegatedAt(text, match.index ?? 0)) return "medium";
   }
   return null;
+}
+
+function isExcludedIntent(intent: string): boolean {
+  return /\b(?:anything|everything|all)\s+but\b|\bexcept\b|\bother\s+than\b/.test(intent);
 }
 
 function isNegatedAt(text: string, index: number): boolean {

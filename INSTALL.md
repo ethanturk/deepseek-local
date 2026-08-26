@@ -130,7 +130,7 @@ model-router:
     rules:
       - id: read-only
         tierId: fast
-        description: >
+        description: >-
           Retrieve or display existing information without analysis,
           judgment, recommendations, or mutation.
         positiveExamples:

@@ -74,6 +74,53 @@ test("semantic rule IDs reject a trailing separator", () => {
   );
 });
 
+test("semantic rules may omit negative examples", () => {
+  assert.doesNotThrow(() => assertValidUseCases(
+    { enabled: true, rules: [{ ...readOnlyRule, negativeExamples: [] }] },
+    { mode: "both", provider: "remote", model: "classifier" },
+    ["fast", "medium", "smart"],
+  ));
+});
+
+for (const [name, rule, message] of [
+  ["unknown tier", { ...readOnlyRule, tierId: "unknown" as never }, /unknown tier "unknown"/],
+  ["empty description", { ...readOnlyRule, description: "" }, /description must not be empty/],
+  ["whitespace description", { ...readOnlyRule, description: "  " }, /description must not be empty/],
+  ["empty positive example", { ...readOnlyRule, positiveExamples: [""] }, /positive examples must not be empty/],
+  ["whitespace positive example", { ...readOnlyRule, positiveExamples: ["  "] }, /positive examples must not be empty/],
+  ["empty negative example", { ...readOnlyRule, negativeExamples: [""] }, /negative examples must not be empty/],
+  ["whitespace negative example", { ...readOnlyRule, negativeExamples: ["  "] }, /negative examples must not be empty/],
+] as const) {
+  test(`semantic validation rejects ${name}`, () => {
+    assert.throws(
+      () => assertValidUseCases(
+        { enabled: true, rules: [rule] },
+        { mode: "both", provider: "remote", model: "classifier" },
+        ["fast", "medium", "smart"],
+      ),
+      message,
+    );
+  });
+}
+
+for (const [name, classifier] of [
+  ["missing provider", { mode: "llm", model: "classifier" }],
+  ["blank provider", { mode: "both", provider: "  ", model: "classifier" }],
+  ["missing model", { mode: "llm", provider: "remote" }],
+  ["blank model", { mode: "both", provider: "remote", model: "  " }],
+] as const) {
+  test(`active semantic rules reject ${name}`, () => {
+    assert.throws(
+      () => assertValidUseCases(
+        enabledUseCases,
+        classifier,
+        ["fast", "medium", "smart"],
+      ),
+      /with a provider and model/,
+    );
+  });
+}
+
 const enabledUseCases = { enabled: true, rules: [readOnlyRule] };
 
 test("active rules are embedded in the existing classifier prompt", () => {
@@ -86,6 +133,28 @@ test("active rules are embedded in the existing classifier prompt", () => {
   assert.match(prompt, /I'll paginate through the threads/);
   assert.match(prompt, /Review PR 81522/);
   assert.match(prompt, /entire current request/);
+});
+
+test("overlapping rules require the first configured match", () => {
+  const prompt = buildClassifierPrompt(
+    "Read src/index.ts",
+    "user: Read src/index.ts",
+    {
+      enabled: true,
+      rules: [
+        readOnlyRule,
+        {
+          ...readOnlyRule,
+          id: "retrieve",
+          tierId: "medium",
+          description: "Retrieve existing information.",
+        },
+      ],
+    },
+  );
+
+  assert.match(prompt, /first configured matching rule/i);
+  assert.ok(prompt.indexOf("use-case:read-only") < prompt.indexOf("use-case:retrieve"));
 });
 
 test("disabled rules preserve the legacy prompt contract", () => {
@@ -127,4 +196,22 @@ test("explicit stronger tier requests are detected before use-case routing", () 
   assert.equal(explicitStrongerTier("Don't use smart; use medium"), "medium");
   assert.equal(explicitStrongerTier("escalate"), "medium");
   assert.equal(explicitStrongerTier("Show ADO PR 81522 details"), null);
+});
+
+for (const request of [
+  "Use anything but smart",
+  "Use everything except smart tier",
+  "Use any model other than smart",
+  "Route this to anything but medium",
+  "Choose any tier except medium",
+  "Run this on a model other than medium",
+]) {
+  test(`excluded tier is not affirmative intent: ${request}`, () => {
+    assert.equal(explicitStrongerTier(request), null);
+  });
+}
+
+test("affirmative tier intent still wins when another tier is excluded", () => {
+  assert.equal(explicitStrongerTier("Use smart, not medium"), "smart");
+  assert.equal(explicitStrongerTier("Use anything but smart; use medium"), "medium");
 });
