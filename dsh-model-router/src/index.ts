@@ -187,7 +187,9 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
   );
   const state = new Map<string, RouterState>();
   const tierBySignal = new WeakMap<object, TierId>();
+  const routedRequests = new WeakSet<object>();
   const inheritedSubagentTiers = new Set<string>();
+  const providerFailureFallbacks = new Set<string>();
   const llm = (ctx as any).llm;
   // ---------- helpers ----------
 
@@ -521,6 +523,14 @@ ${assistantResponse.slice(0, 3000)}`;
       };
     }
 
+    /** LlmAdapter.prepareCall — bind metadata and dispatch for DSH RC2 */
+    async prepareCall(provider: string, model: string, signal?: AbortSignal) {
+      return {
+        model: await this.resolveModel(provider, model, signal),
+        stream: (options: Record<string, any>) => this.stream(options),
+      };
+    }
+
     /** LlmAdapter.stream — delegate to the real provider after resolving the tier */
     async *stream(options: Record<string, any>): AsyncIterable<unknown> {
       try {
@@ -574,7 +584,7 @@ ${assistantResponse.slice(0, 3000)}`;
   }
 
   // ========================================================
-  // EVENT HANDLERS — Harness v0.1.0-rc.7 API
+  // EVENT HANDLERS — Harness developer-preview API
   // ========================================================
 
   // ---------- Event: new user message → classify (pre-step) ----------
@@ -675,9 +685,6 @@ ${assistantResponse.slice(0, 3000)}`;
       const s = getOrCreateState(agentId);
       const tierId = s.currentTierId;
       const tier = tierConfig(tierId);
-      if (payload?.signal && typeof payload.signal === "object") {
-        tierBySignal.set(payload.signal, tierId);
-      }
       console.error(`[dsh-debug] agent/request: agentId=${agentId} tierId=${tierId}`);
 
       if (!tier) {
@@ -687,14 +694,18 @@ ${assistantResponse.slice(0, 3000)}`;
 
       // Get the default config from the waterfall
       const defaultConfig = await next?.();
-      console.error(`[dsh-debug] agent/request: defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model} returning=${tier.provider}/${tier.model}`);
+      console.error(`[dsh-debug] agent/request: defaultConfig.provider=${defaultConfig?.provider} defaultConfig.model=${defaultConfig?.model}`);
 
       const usesVirtualRoute =
         defaultConfig?.provider === VIRTUAL_PROVIDER &&
         defaultConfig?.model === config.virtualModel.id;
-      const selection: Record<string, unknown> = usesVirtualRoute
-        ? { ...defaultConfig }
-        : { provider: tier.provider, model: tier.model };
+      if (!usesVirtualRoute) return defaultConfig;
+
+      if (payload?.signal && typeof payload.signal === "object") {
+        tierBySignal.set(payload.signal, tierId);
+        routedRequests.add(payload.signal);
+      }
+      const selection: Record<string, unknown> = { ...defaultConfig };
 
       // Add reasoningEffort if not disabled
       if (!s.reasoningEffortDisabled && tier.reasoningEffort !== undefined) {
@@ -729,44 +740,80 @@ ${assistantResponse.slice(0, 3000)}`;
     }
   });
 
-  // ---------- Detect flaky / unsupported reasoningEffort ----------
+  // ---------- Recover failures only for requests owned by the virtual route ----------
   const onRequestError = async (payload: any, next: any) => {
     try {
       const agent = payload?.agent;
       const agentId = agent?.id ?? "unknown";
       const err = payload?.failure ?? payload?.error ?? payload?.reason ?? payload;
-
-      if (!isReasoningEffortError(err)) return await next?.();
+      if (
+        !payload?.signal ||
+        typeof payload.signal !== "object" ||
+        !routedRequests.has(payload.signal)
+      ) {
+        return await next?.();
+      }
+      if (payload?.signal?.aborted) return await next?.();
 
       const s = getOrCreateState(agentId);
-      if (s.reasoningEffortDisabled) return await next?.();
-
-      s.reasoningEffortDisabled = true;
-      s.lastReasoningEffortError = String(
-        (err as any)?.message ?? (err as any)?.code ?? err,
-      );
-
-      emitDecision(agentId, "reasoning-effort-fallback", {
-        tierId: s.currentTierId,
-        error: s.lastReasoningEffortError,
-        action: "disable-effort-and-retry",
-      });
-
-      try {
-        agent?.inject?.({
-          role: "user",
-          content:
-            `[Model Router] reasoningEffort was rejected by the provider (${s.lastReasoningEffortError}). ` +
-            `This tier will retry without reasoning effort.`,
-        });
-      } catch {
-        console.warn(
-          `[dsh-model-router] reasoningEffort fallback (${agentId}):`,
-          s.lastReasoningEffortError,
+      if (isReasoningEffortError(err) && !s.reasoningEffortDisabled) {
+        s.reasoningEffortDisabled = true;
+        s.lastReasoningEffortError = String(
+          (err as any)?.message ?? (err as any)?.code ?? err,
         );
+
+        emitDecision(agentId, "reasoning-effort-fallback", {
+          tierId: s.currentTierId,
+          error: s.lastReasoningEffortError,
+          action: "disable-effort-and-retry",
+        });
+
+        try {
+          agent?.inject?.({
+            role: "user",
+            content:
+              `[Model Router] reasoningEffort was rejected by the provider (${s.lastReasoningEffortError}). ` +
+              `This tier will retry without reasoning effort.`,
+          });
+        } catch {
+          console.warn(
+            `[dsh-model-router] reasoningEffort fallback (${agentId}):`,
+            s.lastReasoningEffortError,
+          );
+        }
+
+        return { kind: "retry" };
       }
 
-      return await next?.();
+      const downstream = await next?.();
+      if (downstream?.kind === "retry" || payload?.signal?.aborted) {
+        return downstream;
+      }
+
+      const fallbackTier = oneTierBelow(s.currentTierId);
+      const current = tierConfig(s.currentTierId);
+      const fallback = tierConfig(fallbackTier);
+      if (
+        s.currentTierId !== "smart" ||
+        providerFailureFallbacks.has(agentId) ||
+        !current ||
+        !fallback ||
+        (current.provider === fallback.provider && current.model === fallback.model)
+      ) {
+        return downstream;
+      }
+
+      providerFailureFallbacks.add(agentId);
+      s.currentTierId = fallbackTier;
+      s.stickyUntil = "end-of-turn";
+      if (payload?.signal) tierBySignal.set(payload.signal, fallbackTier);
+      emitDecision(agentId, "provider-failure-fallback", {
+        tierId: fallbackTier,
+        failedProvider: current.provider,
+        failedModel: current.model,
+        error: String((err as any)?.code ?? "UNKNOWN"),
+      });
+      return { kind: "retry" };
     } catch (e) {
       console.warn("[dsh-model-router] request-error handler failed", e);
       return await next?.();
@@ -781,6 +828,7 @@ ${assistantResponse.slice(0, 3000)}`;
       const agent = payload?.agent;
       const agentId = agent?.id ?? "unknown";
       const s = getOrCreateState(agentId);
+      providerFailureFallbacks.delete(agentId);
 
       // Clear turn-scoped stickiness
       if (s.stickyUntil === "end-of-turn") {

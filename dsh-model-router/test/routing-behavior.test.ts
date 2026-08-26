@@ -123,11 +123,59 @@ test("subagent keeps inherited tier for its initial request", async () => {
   );
   const selection = await handlers.get("agent/request")?.(
     { agent, signal: new AbortController().signal },
-    () => ({ provider: "physical", model: "default" }),
+    () => ({ provider: "auto-tier", model: "auto-tier" }),
   );
 
-  assert.deepEqual(selection, { provider: "local", model: "local-medium" });
+  assert.deepEqual(selection, { provider: "auto-tier", model: "auto-tier" });
   assert.equal(handlers.modelRouter.getCurrentTier("child-agent"), "medium");
+});
+
+test("direct physical model stays outside routing and recovery", async () => {
+  const handlers = createHarness({ activeAgentId: "direct-model-agent" });
+  const agent = { id: "direct-model-agent" };
+  const signal = new AbortController().signal;
+  const directConfig = {
+    provider: "litellm",
+    model: "gpt-5.6-terra-high",
+    reasoningEffort: "high",
+    temperature: 0.2,
+  };
+  handlers.modelRouter.forceTier(agent.id, "smart");
+
+  const selection = await handlers.get("agent/request")?.(
+    { agent, signal },
+    () => directConfig,
+  );
+  let delegated = false;
+  const recovery = await handlers.get("agent/request-error")?.(
+    {
+      agent,
+      signal,
+      failure: {
+        code: "PI_AI_ERROR",
+        message: "The directly selected provider rejected the request.",
+      },
+    },
+    () => {
+      delegated = true;
+      return undefined;
+    },
+  );
+
+  assert.deepEqual(
+    {
+      selection,
+      recovery,
+      delegated,
+      tier: handlers.modelRouter.getCurrentTier(agent.id),
+    },
+    {
+      selection: directConfig,
+      recovery: undefined,
+      delegated: true,
+      tier: "smart",
+    },
+  );
 });
 
 test("model failure escalation advances the tier for the active request", async () => {
@@ -158,6 +206,106 @@ test("model failure escalation advances the tier for the active request", async 
   })) {}
 
   assert.deepEqual(routedModels, ["local/local-medium"]);
+});
+
+test("terminal smart-tier provider failure falls back once per turn", async () => {
+  const handlers = createHarness({ activeAgentId: "provider-failure-agent" });
+  const agent = { id: "provider-failure-agent" };
+  const signal = new AbortController().signal;
+  handlers.modelRouter.forceTier(agent.id, "smart");
+  await handlers.get("agent/request")?.(
+    { agent, signal },
+    () => ({ provider: "auto-tier", model: "auto-tier" }),
+  );
+
+  const decision = await handlers.get("agent/request-error")?.(
+    {
+      agent,
+      signal,
+      failure: {
+        code: "PI_AI_ERROR",
+        message: "The remote provider rejected the request.",
+      },
+    },
+    () => undefined,
+  );
+
+  assert.deepEqual(decision, { kind: "retry" });
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "medium");
+
+  assert.equal(
+    handlers.modelRouter.escalateTier(agent.id, "local retry failed", signal),
+    "smart",
+  );
+  const repeated = await handlers.get("agent/request-error")?.(
+    {
+      agent,
+      signal,
+      failure: {
+        code: "PI_AI_ERROR",
+        message: "The remote provider rejected the retry.",
+      },
+    },
+    () => undefined,
+  );
+
+  assert.equal(repeated, undefined);
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "smart");
+
+  await handlers.get("agent/turn-stopping")?.({ agent }, () => undefined);
+  const nextTurnSignal = new AbortController().signal;
+  await handlers.get("agent/request")?.(
+    { agent, signal: nextTurnSignal },
+    () => ({ provider: "auto-tier", model: "auto-tier" }),
+  );
+  const nextTurn = await handlers.get("agent/request-error")?.(
+    {
+      agent,
+      signal: nextTurnSignal,
+      failure: {
+        code: "PI_AI_ERROR",
+        message: "The remote provider rejected a later request.",
+      },
+    },
+    () => undefined,
+  );
+
+  assert.deepEqual(nextTurn, { kind: "retry" });
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "medium");
+});
+
+test("reasoning-effort failure retries the same tier without delegating", async () => {
+  const handlers = createHarness({ activeAgentId: "effort-failure-agent" });
+  const agent = {
+    id: "effort-failure-agent",
+    inject() {},
+  };
+  handlers.modelRouter.forceTier(agent.id, "smart");
+  const signal = new AbortController().signal;
+  await handlers.get("agent/request")?.(
+    { agent, signal },
+    () => ({ provider: "auto-tier", model: "auto-tier" }),
+  );
+  let delegated = false;
+
+  const decision = await handlers.get("agent/request-error")?.(
+    {
+      agent,
+      signal,
+      failure: {
+        code: "UNSUPPORTED",
+        message: "reasoning effort is unsupported",
+      },
+    },
+    () => {
+      delegated = true;
+      return undefined;
+    },
+  );
+
+  assert.deepEqual(decision, { kind: "retry" });
+  assert.equal(delegated, false);
+  assert.equal(handlers.modelRouter.getCurrentTier(agent.id), "smart");
 });
 
 test("virtual model exposes metadata for the tier selected during pre-step", async () => {
@@ -280,6 +428,51 @@ test("virtual route stays selected while its adapter delegates to the chosen tie
   assert.equal(routedOptions.provider, "remote");
   assert.equal(routedOptions.model, "remote-smart");
   assert.deepEqual(routedOptions.tools, [{ name: "read" }]);
+  assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
+});
+
+test("virtual adapter prepares an RC2 model call", async () => {
+  const routedModels: string[] = [];
+  const signal = new AbortController().signal;
+  const handlers = createHarness({
+    activeAgentId: "prepare-agent",
+    resolveModelInfo: async (provider, model) => ({
+      provider,
+      id: model,
+      name: "Fast model",
+      context: { contextWindow: 131_072 },
+    }),
+    stream: async function* (options) {
+      routedModels.push(`${options.provider}/${options.model}`);
+      yield* textStream("prepared response");
+    },
+  });
+  handlers.modelRouter.forceTier("prepare-agent", "fast");
+
+  const prepared = await handlers.adapter.prepareCall(
+    "auto-tier",
+    "auto-tier",
+    signal,
+  );
+
+  assert.deepEqual(prepared.model, {
+    provider: "auto-tier",
+    id: "auto-tier",
+    name: "Auto (Tiered Router)",
+    description: "Automatic tiered routing (fast → medium → smart)",
+    context: { contextWindow: 131_072 },
+  });
+  const chunks = [];
+  for await (const chunk of prepared.stream({
+    provider: "auto-tier",
+    model: "auto-tier",
+    messages: [],
+    signal,
+  })) {
+    chunks.push(chunk);
+  }
+
+  assert.deepEqual(routedModels, ["local/local-fast"]);
   assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
 });
 
