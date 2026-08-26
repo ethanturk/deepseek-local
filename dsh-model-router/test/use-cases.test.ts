@@ -100,10 +100,17 @@ test("only exact configured use-case responses are accepted", () => {
     parseClassifierDecision("use-case:read-only because it is easy", enabledUseCases),
     null,
   );
+  assert.equal(
+    parseClassifierDecision("use-case:read-only", { enabled: false, rules: [readOnlyRule] }),
+    null,
+  );
 });
 
 test("explicit stronger tier requests are detected before use-case routing", () => {
   assert.equal(explicitStrongerTier("Use the smart model to read PR 81522"), "smart");
   assert.equal(explicitStrongerTier("Route this file read to medium tier"), "medium");
+  assert.equal(explicitStrongerTier("Don't use smart model"), null);
+  assert.equal(explicitStrongerTier("Use medium, not smart"), "medium");
+  assert.equal(explicitStrongerTier("escalate"), "medium");
   assert.equal(explicitStrongerTier("Show ADO PR 81522 details"), null);
 });

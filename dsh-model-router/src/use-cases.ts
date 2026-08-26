@@ -108,6 +108,7 @@ export function parseClassifierDecision(
 
   const match = /^use-case:([a-z0-9][a-z0-9-]{0,63})$/.exec(response);
   if (!match) return null;
+  if (!useCases.enabled) return null;
   const rule = useCases.rules.find(({ id }) => id === match[1]);
   return rule
     ? { kind: "use-case", useCaseId: rule.id, tierId: rule.tierId }
@@ -116,11 +117,18 @@ export function parseClassifierDecision(
 
 export function explicitStrongerTier(message: string): "medium" | "smart" | null {
   const text = message.trim().toLowerCase();
-  const request = /\b(?:use|choose|force|route|switch|select|pick|send|move|run|set)\b(?:\s+[\w'-]+){0,8}\s+(smart|medium)(?:\s+(?:model|tier))?\b/;
-  const escalation = /\bescalat(?:e|ed|ing|ion)\b(?:\s+[\w'-]+){0,8}\s+(smart|medium)(?:\s+(?:model|tier))?\b/;
-  if (request.test(text) || escalation.test(text)) {
-    if (/\bsmart(?:\s+(?:model|tier))?\b/.test(text)) return "smart";
+  const intent = /\b(?:use|choose|force|route|switch|select|pick|send|move|run|set|escalat(?:e|ed|ing|ion))\b(?:\s+(?!(?:not|never|don't|dont|do)\b)[\w'-]+){0,8}\s+(smart|medium)(?:\s+(?:model|tier))?\b/g;
+  let mediumRequested = false;
+  for (const match of text.matchAll(intent)) {
+    const before = text.slice(0, match.index ?? 0);
+    if (/\b(?:don't|dont|never|not)\s*$/.test(before) || /\bdo\s+not\s*$/.test(before)) continue;
+    if (match[1] === "smart") return "smart";
+    mediumRequested = true;
+  }
+  if (mediumRequested) return "medium";
+  if (/\bescalat(?:e|ed|ing|ion)\b/.test(text) &&
+    !/(?:\b(?:don't|dont|never|not)\s*$|\bdo\s+not\s*$)/.test(text)) {
     return "medium";
   }
-  return /\bescalat(?:e|ed|ing|ion)\b/.test(text) ? "medium" : null;
+  return null;
 }
