@@ -9,7 +9,7 @@ export type ClassifierDecision =
   | { kind: "complexity"; complexity: Complexity }
   | { kind: "use-case"; useCaseId: string; tierId: TierId };
 
-const USE_CASE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const USE_CASE_ID = /^(?=.{1,64}$)[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function assertTrimmed(value: string, label: string): void {
   if (!value.trim()) throw new Error(`${label} must not be empty`);

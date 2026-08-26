@@ -63,6 +63,17 @@ test("semantic rule ids and content are validated", () => {
   );
 });
 
+test("semantic rule IDs reject a trailing separator", () => {
+  assert.throws(
+    () => assertValidUseCases(
+      { enabled: true, rules: [{ ...readOnlyRule, id: "read-" }] },
+      { mode: "both", provider: "remote", model: "classifier" },
+      ["fast", "medium", "smart"],
+    ),
+    /must be lowercase kebab-case/,
+  );
+});
+
 const enabledUseCases = { enabled: true, rules: [readOnlyRule] };
 
 test("active rules are embedded in the existing classifier prompt", () => {
