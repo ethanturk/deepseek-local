@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DEFAULT_CONFIG } from "../src/types.ts";
-import { assertValidUseCases } from "../src/use-cases.ts";
+import {
+  assertValidUseCases,
+  buildClassifierPrompt,
+  explicitStrongerTier,
+  parseClassifierDecision,
+} from "../src/use-cases.ts";
 
 const readOnlyRule = {
   id: "read-only",
@@ -56,4 +61,49 @@ test("semantic rule ids and content are validated", () => {
     ),
     /at least one positive example/,
   );
+});
+
+const enabledUseCases = { enabled: true, rules: [readOnlyRule] };
+
+test("active rules are embedded in the existing classifier prompt", () => {
+  const prompt = buildClassifierPrompt(
+    "Show ADO PR 81522 details",
+    "user: Show ADO PR 81522 details",
+    enabledUseCases,
+  );
+  assert.match(prompt, /use-case:read-only/);
+  assert.match(prompt, /I'll paginate through the threads/);
+  assert.match(prompt, /Review PR 81522/);
+  assert.match(prompt, /entire current request/);
+});
+
+test("disabled rules preserve the legacy prompt contract", () => {
+  const prompt = buildClassifierPrompt(
+    "Refactor authentication",
+    "user: Refactor authentication",
+    { enabled: false, rules: [readOnlyRule] },
+  );
+  assert.match(prompt, /Reply with exactly one word: simple, medium, or hard\./);
+  assert.doesNotMatch(prompt, /use-case:/);
+});
+
+test("only exact configured use-case responses are accepted", () => {
+  assert.deepEqual(
+    parseClassifierDecision("use-case:read-only", enabledUseCases),
+    { kind: "use-case", useCaseId: "read-only", tierId: "fast" },
+  );
+  assert.equal(
+    parseClassifierDecision("use-case:unknown", enabledUseCases),
+    null,
+  );
+  assert.equal(
+    parseClassifierDecision("use-case:read-only because it is easy", enabledUseCases),
+    null,
+  );
+});
+
+test("explicit stronger tier requests are detected before use-case routing", () => {
+  assert.equal(explicitStrongerTier("Use the smart model to read PR 81522"), "smart");
+  assert.equal(explicitStrongerTier("Route this file read to medium tier"), "medium");
+  assert.equal(explicitStrongerTier("Show ADO PR 81522 details"), null);
 });
