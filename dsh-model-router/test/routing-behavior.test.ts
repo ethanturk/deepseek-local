@@ -1028,10 +1028,35 @@ test("virtual provider delegates retry policy resolution to DSH", () => {
   );
 });
 
+test("validator reserves output space for reasoning before its JSON verdict", async () => {
+  const validatorBudgets: number[] = [];
+  const handlers = createHarness({
+    classifierMode: "heuristic",
+    stream: async function* (options) {
+      if (modelPrompt(options)) {
+        validatorBudgets.push(options.maxTokens);
+        yield* textStream('{"verdict":"pass"}');
+      }
+    },
+  });
+  const messages = [
+    { role: "user", content: "Fix the issue", source: { kind: "user" } },
+    { role: "assistant", content: "Implemented and verified the fix." },
+  ];
+  const agent = {
+    id: "reasoning-validator-agent",
+    session: { deriveMessages: () => messages },
+  };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [messages[0]] }, () => undefined);
+  await handlers.get("agent/turn-stopping")?.({ agent }, () => undefined);
+
+  assert.deepEqual(validatorBudgets, [256]);
+});
+
 test("malformed validator output is retried once then pauses automatic routing", async () => {
   let validatorAttempts = 0;
   const handlers = createHarness({
-    activeAgentId: "malformed-validator-agent",
     classifierMode: "heuristic",
     stream: async function* (options) {
       if (modelPrompt(options)) {
@@ -1048,17 +1073,23 @@ test("malformed validator output is retried once then pauses automatic routing",
     id: "malformed-validator-agent",
     session: { deriveMessages: () => messages },
   };
+  const signal = new AbortController().signal;
 
-  await handlers.get("agent/pre-step")?.({ agent, messages: [messages[0]] }, () => undefined);
+  await handlers.get("agent/pre-step")?.({ agent, messages: [messages[0]], signal }, () => undefined);
   await handlers.get("agent/turn-stopping")?.({ agent }, () => undefined);
 
   assert.equal(validatorAttempts, 2);
   assert.equal(handlers.modelRouter.getState(agent.id)?.routingPaused, true);
+  await handlers.get("agent/request")?.(
+    { agent, signal },
+    () => ({ provider: "auto-tier", model: "auto-tier" }),
+  );
   await assert.rejects(async () => {
     for await (const _chunk of handlers.adapter.stream({
       provider: "auto-tier",
       model: "auto-tier",
       messages,
+      signal,
     })) {}
   }, /Automatic routing paused/);
 });

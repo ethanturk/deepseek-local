@@ -215,6 +215,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
   );
   const state = new Map<string, RouterState>();
   const tierBySignal = new WeakMap<object, TierId>();
+  const agentBySignal = new WeakMap<object, string>();
   const routedRequests = new WeakSet<object>();
   const inheritedSubagentTiers = new Set<string>();
   const providerFailureFallbacks = new Set<string>();
@@ -463,7 +464,7 @@ Assistant response:
 ${assistantResponse.slice(0, 3000)}`;
 
       for (let attempt = 1; attempt <= 2; attempt++) {
-        const text = await generateText(smart.provider, smart.model, prompt, 60);
+        const text = await generateText(smart.provider, smart.model, prompt, 256);
         const verdict = parseValidatorVerdict(text);
         if (verdict) return verdict;
         console.warn(`[dsh-model-router] invalid validator reply (attempt ${attempt}/2):`, text);
@@ -547,7 +548,9 @@ ${assistantResponse.slice(0, 3000)}`;
         };
       }
 
-      const activeAgentId = (ctx as any).agents?.currentAgent?.()?.id;
+      const activeAgentId =
+        (ctx as any).agents?.currentAgent?.()?.id ??
+        (signal && agentBySignal.get(signal));
       const tierId =
         (signal && tierBySignal.get(signal)) ??
         (activeAgentId ? state.get(activeAgentId)?.currentTierId : undefined) ??
@@ -578,7 +581,9 @@ ${assistantResponse.slice(0, 3000)}`;
     async *stream(options: Record<string, any>): AsyncIterable<unknown> {
       try {
         // Resolve the tier for the current agent
-        const activeAgentId = (ctx as any).agents?.currentAgent?.()?.id;
+        const activeAgentId =
+          (ctx as any).agents?.currentAgent?.()?.id ??
+          (options.signal && agentBySignal.get(options.signal));
         const activeState = activeAgentId ? state.get(activeAgentId) : undefined;
         if (activeState?.routingPaused) {
           throw new Error("Automatic routing paused after validator failure; choose a physical model manually.");
@@ -639,6 +644,7 @@ ${assistantResponse.slice(0, 3000)}`;
       const s = getOrCreateState(agentId);
       if (payload?.signal && typeof payload.signal === "object") {
         tierBySignal.set(payload.signal, s.currentTierId);
+        agentBySignal.set(payload.signal, agentId);
       }
 
       // Only classify on new user messages, not on every step
@@ -764,6 +770,7 @@ ${assistantResponse.slice(0, 3000)}`;
 
       if (payload?.signal && typeof payload.signal === "object") {
         tierBySignal.set(payload.signal, tierId);
+        agentBySignal.set(payload.signal, agentId);
         routedRequests.add(payload.signal);
       }
       const selection: Record<string, unknown> = { ...defaultConfig };

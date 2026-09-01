@@ -734,7 +734,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
       console.warn("[dsh-local-model-guard] pre-step error", err);
     }
     const decision = await next();
-    if (!recoveryReason || decision.kind !== "enter") return decision;
+    if (!recoveryReason || decision?.kind !== "enter") return decision;
     return {
       ...decision,
       messages: [...decision.messages, createRecoveryMessage(recoveryReason)],

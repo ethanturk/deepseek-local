@@ -149,6 +149,34 @@ test("repeated tools add recovery to the pre-step decision", async () => {
   assert.match(JSON.stringify(decision.messages[0].content), /repeated tool signature/);
 });
 
+test("pre-step preserves an undefined downstream decision during recovery", async () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  apply({
+    on(event: string, handler: (...args: any[]) => unknown) {
+      handlers.set(event, handler);
+    },
+  } as any, {
+    enableRetries: false,
+    enableSystemPromptHint: false,
+    forceAlways: true,
+  });
+
+  const postExecute = handlers.get("tools/post-execute");
+  const preStep = handlers.get("agent/pre-step");
+  assert.ok(postExecute);
+  assert.ok(preStep);
+  const exec = { agentId: "agent-1", name: "run_code", arguments: { code: "same" } };
+  const result = { isError: false, content: "ok" };
+  const accept = async () => ({ kind: "accept" });
+  await postExecute(exec, result, accept);
+  await postExecute(exec, result, accept);
+
+  assert.equal(
+    await preStep({ agentId: "agent-1", messages: [] }, async () => undefined),
+    undefined,
+  );
+});
+
 test("context pressure compacts at the configured model-window threshold", async () => {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const compactCalls: Array<{ trigger: string; signal: AbortSignal }> = [];
