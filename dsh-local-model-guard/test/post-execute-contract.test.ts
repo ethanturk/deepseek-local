@@ -23,7 +23,7 @@ test("post-execute accepts DSH's exec, result, next signature", async () => {
   const decision = { kind: "accept" };
   let called = false;
   const actual = await handler(
-    { agentId: "agent-1", name: "Bash", arguments: { command: "pwd" } },
+    { agentId: "agent-1", name: "bash", arguments: { command: "pwd" } },
     { isError: false, content: "ok" },
     async () => {
       called = true;
@@ -64,7 +64,7 @@ test("caps redundant Bash escalation retries across smart tiers", async () => {
   assert.ok(turnEnd);
   const exec = {
     agent,
-    name: "Bash",
+    name: "bash",
     arguments: {
       command: "git status --short",
       sandbox_permissions: "danger-full-access",

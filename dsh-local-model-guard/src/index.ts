@@ -467,7 +467,7 @@ export function apply(ctx: Context, rawConfig?: Partial<LocalGuardConfig>) {
         const failure = result?.error ?? result?.failure;
         const failureCode = String(failure?.code ?? result?.code ?? "");
         const redundantBashEscalation =
-          toolName === "Bash" &&
+          toolName === "bash" &&
           Boolean(result?.isError ?? result?.error ?? result?.failed) &&
           /^sandbox escalation to .+ is not strictly wider than this call's current .+ mode$/i
             .test(String(failure?.message ?? result?.message ?? "").trim());
