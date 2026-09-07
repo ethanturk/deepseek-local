@@ -444,7 +444,34 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     agentId: string,
     userMessage: string,
     assistantResponse: string,
+    messages?: any[],
+    signal?: AbortSignal,
   ): Promise<ValidationResult> {
+    // LLM-as-a-Verifier plugin (dsh-llm-verifier) provides a fine-grained
+    // logprob score; when configured it replaces the binary JSON judge.
+    const verifier = (ctx as any).llmVerifier;
+    if (Array.isArray(messages) && verifier?.isConfigured?.()) {
+      try {
+        const result = await verifier.scoreTurn({
+          agentId,
+          problem: userMessage,
+          messages,
+          signal,
+        });
+        return {
+          passed: result.passed,
+          reason: result.passed
+            ? undefined
+            : `LLM verifier score ${result.score.toFixed(2)} below threshold ${result.threshold}`,
+        };
+      } catch (err) {
+        console.warn(
+          "[dsh-model-router] llm-verifier scoring failed; falling back to JSON judge",
+          err,
+        );
+      }
+    }
+
     const smart = tierConfig(config.validator.alwaysUseTierId);
     if (!smart) {
       return { passed: true, reason: "no smart tier configured" };
@@ -926,7 +953,10 @@ ${assistantResponse.slice(0, 3000)}`;
         agentId,
         s.lastUserMessage,
         assistantResponse,
+        messages,
+        payload?.signal,
       );
+      if (payload?.signal?.aborted) return next?.() ?? undefined;
       s.lastValidation = validation;
       if (validation.routingPaused) s.routingPaused = true;
       emitDecision(agentId, "validate", {

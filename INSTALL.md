@@ -74,9 +74,11 @@ grep -n "name:" /tmp/dsh-local-combined.patch.yml
 #   .../dsh-model-router/src/index.ts
 #   .../dsh-local-model-guard/src/index.ts
 #   .../dsh-openai-gateway/src/index.ts
+#   .../dsh-llm-verifier/src/index.ts
 test -f "$PLUGIN_ROOT/dsh-model-router/src/index.ts"
 test -f "$PLUGIN_ROOT/dsh-local-model-guard/src/index.ts"
 test -f "$PLUGIN_ROOT/dsh-openai-gateway/src/index.ts"
+test -f "$PLUGIN_ROOT/dsh-llm-verifier/src/index.ts"
 ```
 
 ### 2.2 Optional: edit in-repo copies
@@ -186,6 +188,22 @@ openai-gateway:
 Use `toolPolicy: permissive` only when API clients should be able to invoke
 installed DSH tools. Client-declared function tools remain client-owned under
 both policies.
+
+To replace the router's binary JSON judge with logprob-based verification,
+point `llm-verifier` at an OpenAI-compatible endpoint that returns token
+logprobs (vLLM, SGLang, llama.cpp, DeepSeek API) and set its model:
+
+```yaml
+llm-verifier:
+  baseUrl: http://127.0.0.1:8000/v1
+  apiKeyEnv: OPENAI_API_KEY
+  model: your-verifier-model-id
+  nEvaluations: 2
+  threshold: 0.5
+```
+
+Without `model` configured the plugin is inert and the router keeps its
+JSON judge.
 
 From **`HARNESS_ROOT`**:
 

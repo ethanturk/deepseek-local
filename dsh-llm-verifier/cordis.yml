@@ -1,0 +1,22 @@
+# Bundle patch used by DSH plugin installation.
+#
+# Load together with the router via dsh-combined-patch.yml at the repo root.
+
+- insert:
+    - id: dsh-llm-verifier
+      name: "dsh-llm-verifier"
+      # Runtime controls belong in the llm-verifier section of settings.yaml.
+      # Optional config:
+      # config:
+      #   baseUrl: "http://127.0.0.1:8000/v1"
+      #   apiKeyEnv: "OPENAI_API_KEY"
+      #   model: "your-verifier-model"
+      #   nEvaluations: 2
+      #   topLogprobs: 20
+      #   maxTokens: 1024
+      #   timeoutMs: 60000
+      #   threshold: 0.5
+      #   maxTrajectoryChars: 24000
+      #   maxStepChars: 2000
+      #   criteria: []
+      #   steerOnLowScore: true
