@@ -24,6 +24,7 @@ function createHarness(options: {
   useCases?: UseCasesConfig;
   compositionUseCases?: UseCasesConfig;
   sessionEvents?: Record<string, unknown>[];
+  llmVerifier?: unknown;
 }) {
   const handlers = new Map<string, Handler>() as TestHandlers;
   let settingsWatcher: (() => void) | undefined;
@@ -104,6 +105,7 @@ function createHarness(options: {
     },
     systemPrompt: { section() {} },
     tools: {},
+    llmVerifier: options.llmVerifier,
   };
 
   applyRouter(
@@ -1139,4 +1141,62 @@ test("failed validation steers regeneration on the next tier", async () => {
     provider: "auto-tier",
     model: "auto-tier",
   });
+});
+
+test("configured llmVerifier replaces the JSON judge on validation failure", async () => {
+  const steered: unknown[] = [];
+  let streamCalls = 0;
+  const scoreTurnCalls: unknown[] = [];
+  const handlers = createHarness({
+    classifierMode: "heuristic",
+    stream: async function* () {
+      streamCalls++;
+      yield* textStream('{"verdict":"pass"}');
+    },
+    llmVerifier: {
+      isConfigured: () => true,
+      scoreTurn: async (input: unknown) => {
+        scoreTurnCalls.push(input);
+        return {
+          score: 0.2,
+          threshold: 0.5,
+          passed: false,
+          perRep: [0.2],
+          steps: 1,
+        };
+      },
+    },
+  });
+  const agent = {
+    id: "verifier-agent",
+    session: {
+      deriveMessages: () => [
+        { role: "user", content: "Fix it" },
+        { role: "assistant", content: "Changed the implementation." },
+      ],
+    },
+    steer(message: unknown) {
+      steered.push(message);
+    },
+  };
+
+  await handlers.get("agent/pre-step")?.(
+    { agent, messages: agent.session.deriveMessages() },
+    () => undefined,
+  );
+  const tierBefore = handlers.modelRouter.getCurrentTier(agent.id);
+  await handlers.get("agent/turn-stopping")?.({
+    agent,
+    turn: 1,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(scoreTurnCalls.length, 1);
+  assert.equal(streamCalls, 0, "JSON judge must not run when the verifier scores");
+  assert.equal(steered.length, 1);
+  assert.match(
+    JSON.stringify(steered[0]),
+    /LLM verifier score 0\.20 below threshold 0\.5/,
+  );
+  assert.notEqual(handlers.modelRouter.getCurrentTier(agent.id), tierBefore);
 });

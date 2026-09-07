@@ -32,3 +32,10 @@
     - id: dsh-goal-recovery
       name: "/ABSOLUTE_REPO_ROOT/dsh-goal-recovery/src/index.ts"
       # No plugin settings; recovery decisions use persisted goal state.
+
+    - id: dsh-llm-verifier
+      name: "/ABSOLUTE_REPO_ROOT/dsh-llm-verifier/src/index.ts"
+      # Runtime controls belong in the llm-verifier section of settings.yaml.
+      # Requires an OpenAI-compatible endpoint with token logprobs; without
+      # `model` configured the plugin is inert and the router keeps its
+      # binary JSON judge.
