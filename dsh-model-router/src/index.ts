@@ -445,6 +445,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     userMessage: string,
     assistantResponse: string,
     messages?: any[],
+    signal?: AbortSignal,
   ): Promise<ValidationResult> {
     // LLM-as-a-Verifier plugin (dsh-llm-verifier) provides a fine-grained
     // logprob score; when configured it replaces the binary JSON judge.
@@ -455,6 +456,7 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
           agentId,
           problem: userMessage,
           messages,
+          signal,
         });
         return {
           passed: result.passed,
@@ -952,7 +954,9 @@ ${assistantResponse.slice(0, 3000)}`;
         s.lastUserMessage,
         assistantResponse,
         messages,
+        payload?.signal,
       );
+      if (payload?.signal?.aborted) return next?.() ?? undefined;
       s.lastValidation = validation;
       if (validation.routingPaused) s.routingPaused = true;
       emitDecision(agentId, "validate", {

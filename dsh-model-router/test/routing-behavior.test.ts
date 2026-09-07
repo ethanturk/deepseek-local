@@ -1200,3 +1200,57 @@ test("configured llmVerifier replaces the JSON judge on validation failure", asy
   );
   assert.notEqual(handlers.modelRouter.getCurrentTier(agent.id), tierBefore);
 });
+
+test("aborted turn-stopping does not steer after verifier scoring", async () => {
+  const steered: unknown[] = [];
+  let streamCalls = 0;
+  const controller = new AbortController();
+  const handlers = createHarness({
+    classifierMode: "heuristic",
+    stream: async function* () {
+      streamCalls++;
+      yield* textStream('{"verdict":"fail","reason":"judge should not run"}');
+    },
+    llmVerifier: {
+      isConfigured: () => true,
+      scoreTurn: (input: { signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          input.signal?.addEventListener("abort", () => {
+            resolve({
+              score: 0,
+              threshold: 0.5,
+              passed: false,
+              perRep: [0],
+              steps: 1,
+            });
+          });
+        }),
+    },
+  });
+  const agent = {
+    id: "aborted-verifier-agent",
+    session: {
+      deriveMessages: () => [
+        { role: "user", content: "Fix it" },
+        { role: "assistant", content: "Changed the implementation." },
+      ],
+    },
+    steer(message: unknown) {
+      steered.push(message);
+    },
+  };
+
+  await handlers.get("agent/pre-step")?.(
+    { agent, messages: agent.session.deriveMessages() },
+    () => undefined,
+  );
+  const pending = handlers.get("agent/turn-stopping")?.(
+    { agent, turn: 1, signal: controller.signal },
+    () => undefined,
+  );
+  controller.abort();
+  await pending;
+
+  assert.equal(streamCalls, 0, "JSON judge must not run when the verifier scores");
+  assert.equal(steered.length, 0);
+});

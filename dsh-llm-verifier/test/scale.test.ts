@@ -43,6 +43,19 @@ test("expectedValueFromAlts handles fused '>B' tokens", () => {
   assert.equal(score, 1 / 19);
 });
 
+test("expectedValueFromAlts rejects multi-letter word tokens", () => {
+  const score = expectedValueFromAlts([
+    { token: "No", logprob: -0.1 },
+    { token: "B", logprob: -2 },
+  ]);
+  assert.equal(score, 1 / 19);
+});
+
+test("expectedValueFromAlts accepts a letter fused with the closing tag", () => {
+  const score = expectedValueFromAlts([{ token: "B</c1>", logprob: 0 }]);
+  assert.equal(score, 1 / 19);
+});
+
 test("expectedValueFromAlts returns undefined without letters", () => {
   assert.equal(expectedValueFromAlts([{ token: "yes", logprob: 0 }]), undefined);
   assert.equal(expectedValueFromAlts([]), undefined);

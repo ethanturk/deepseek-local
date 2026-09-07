@@ -48,7 +48,9 @@ export function expectedValueFromAlts(
       .replace(/^\s+/, "")
       .replace(/^>+/, "")
       .replace(/^\s+/, "");
-    if (!t) continue;
+    // Only a bare score letter (optionally fused with the closing tag)
+    // counts — words like "No" or "The" must not become grades.
+    if (!/^[A-Ta-t](?:\s*<\/c\d+>)?$/.test(t)) continue;
     const v = letterValue(t[0]);
     if (v === undefined) continue;
     const prev = valsToLp.get(v);

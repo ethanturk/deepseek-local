@@ -73,7 +73,7 @@ export async function scoreTrajectory(
     [steps.length],
     options.criteria,
   );
-  const perRep = await Promise.all(
+  const settled = await Promise.allSettled(
     Array.from({ length: k }, async () => {
       const { text, tokens, positionLogprobs } = await callVerifier(
         backend,
@@ -83,6 +83,13 @@ export async function scoreTrajectory(
       return extractTagScores(text, tokens, positionLogprobs, 1)[0];
     }),
   );
+  const perRep = settled.map((rep) => {
+    if (rep.status === "rejected") {
+      console.warn("[dsh-llm-verifier] scoring repeat failed", rep.reason);
+      return undefined;
+    }
+    return rep.value;
+  });
   const defined = perRep.filter((v): v is number => v !== undefined);
   if (defined.length === 0) {
     throw new Error("verifier returned no readable score");
@@ -133,14 +140,58 @@ function toolCallBlocks(message: any): string[] {
   return out;
 }
 
+const TOOL_RESULT_BLOCK_TYPES = new Set([
+  "tool_result",
+  "toolResult",
+  "tool-result",
+]);
+
 function isToolResultMessage(message: any): boolean {
   if (message?.role === "tool" || message?.role === "toolResult") return true;
+  if (message?.source?.kind === "tool") return true;
   if (Array.isArray(message?.content)) {
-    return message.content.some(
-      (block: any) => block?.type === "tool_result" || block?.type === "toolResult",
+    return message.content.some((block: any) =>
+      TOOL_RESULT_BLOCK_TYPES.has(block?.type),
     );
   }
   return false;
+}
+
+/** Extract text + error flag from tool-result blocks (any known shape). */
+function toolResultText(message: any): {
+  text: string;
+  isError: boolean;
+} {
+  let isError = false;
+  const parts: string[] = [];
+  if (Array.isArray(message?.content)) {
+    for (const block of message.content) {
+      if (!TOOL_RESULT_BLOCK_TYPES.has(block?.type)) {
+        if (block?.type === "text" && typeof block.text === "string") {
+          parts.push(block.text);
+        }
+        continue;
+      }
+      if (block?.isError === true) isError = true;
+      const nested = block?.content;
+      if (typeof nested === "string") {
+        parts.push(nested);
+      } else if (Array.isArray(nested)) {
+        for (const inner of nested) {
+          if (typeof inner === "string") parts.push(inner);
+          else if (inner?.type === "text" && typeof inner.text === "string") {
+            parts.push(inner.text);
+          }
+        }
+      }
+      if (typeof block?.text === "string") parts.push(block.text);
+      if (typeof block?.output === "string") parts.push(block.output);
+    }
+  }
+  if (isError || parts.length > 0) {
+    return { text: parts.join("\n"), isError };
+  }
+  return { text: messageText(message).trim(), isError };
 }
 
 export interface BuildStepsOptions {
@@ -169,9 +220,11 @@ export function buildStepsFromMessages(
         .filter(Boolean);
       steps.push(parts.join("\n"));
     } else if (isToolResultMessage(message)) {
-      const text = messageText(message).trim();
-      if (steps.length === 0) steps.push(`[tool_result] ${text}`);
-      else steps[steps.length - 1] += `\n[tool_result] ${text}`;
+      const { text, isError } = toolResultText(message);
+      const marker = isError ? "[tool_result:error]" : "[tool_result]";
+      const line = `${marker} ${text}`;
+      if (steps.length === 0) steps.push(line);
+      else steps[steps.length - 1] += `\n${line}`;
     }
   }
 
