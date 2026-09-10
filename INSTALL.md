@@ -17,6 +17,7 @@ Confirm all of the following before changing anything:
 | Harness checkout exists | Directory contains `package.json`, `pnpm-workspace.yaml`, and can run `pnpm dsh --help` or equivalent |
 | Dependencies installed | `node_modules` present; prefer `pnpm` |
 | Build artifacts exist | User has already run `pnpm install` and `pnpm run build` at least once |
+| Harness runtime | DSH `0.1.5-rc.1` or newer; run `node scripts/check-dsh-runtime.mjs` from this repository |
 | Node version | Harness requires a supported Node (typically `^22.19 \|\| >=24`; odd majors often unsupported) |
 | This plugin repo is available | Clone or path to `deepseek-local` (this repository) |
 
@@ -31,6 +32,11 @@ Example:
 HARNESS_ROOT=/home/user/src/deepseek-harness
 PLUGIN_ROOT=/home/user/src/deepseek-local
 ```
+
+DSH `0.1.1-rc.2` used WebSocket-only browser downlinks without an idle-liveness
+check. A silently dead connection could leave the UI showing an in-progress
+turn with no reasoning updates even though the server continued appending them.
+The minimum version above uses the newer connection recovery path.
 
 ---
 

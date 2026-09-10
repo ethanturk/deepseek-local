@@ -23,17 +23,21 @@ dsh-combined-patch.yml     # load all plugins with one --patch
 
 ## Quick start
 
-1. Clone this repo and a [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) checkout; build Harness (`pnpm install && pnpm run build`).
-2. Edit absolute paths in `dsh-combined-patch.yml` (or each plugin’s `cordis.yml`) to point at the `src/index.ts` files on your machine.
-3. From the Harness checkout:
+1. Install DeepSeek Harness `0.1.5-rc.1` or newer, then run
+   `node scripts/check-dsh-runtime.mjs`. The `0.1.1-rc.2` web client can retain a
+   silently dead WebSocket and stop showing live reasoning while the agent keeps
+   running on the server.
+2. Clone this repo and a [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) checkout; build Harness (`pnpm install && pnpm run build`).
+3. Edit absolute paths in `dsh-combined-patch.yml` (or each plugin’s `cordis.yml`) to point at the `src/index.ts` files on your machine.
+4. From the Harness checkout:
 
 ```bash
 pnpm dsh web --patch /absolute/path/to/deepseek-local/dsh-combined-patch.yml
 ```
 
-4. Select **Auto (Tiered Router)** in the model picker (or set it as default).
-5. Configure providers/models for the three tiers to match accounts you have.
-6. To use the gateway, set `DSH_OPENAI_API_KEY` in the DSH process environment and call `http://127.0.0.1:3080/v1` with model `auto-tier`.
+5. Select **Auto (Tiered Router)** in the model picker (or set it as default).
+6. Configure providers/models for the three tiers to match accounts you have.
+7. To use the gateway, set `DSH_OPENAI_API_KEY` in the DSH process environment and call `http://127.0.0.1:3080/v1` with model `auto-tier`.
 
 On session restart or a live round-cap transition, `dsh-goal-recovery` asks a
 native question when a goal needs explicit resume or has hit its configured
