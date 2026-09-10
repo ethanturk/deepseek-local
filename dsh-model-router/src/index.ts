@@ -166,7 +166,7 @@ function createRegenerationMessage(reason: string) {
       type: "text",
       text: `[Model Router] Regenerate the answer for the original request on the higher tier. Address this validation failure: ${reason}`,
     }],
-    source: { kind: "plugin", id: name },
+    source: { kind: "plugin", plugin: name },
   };
 }
 

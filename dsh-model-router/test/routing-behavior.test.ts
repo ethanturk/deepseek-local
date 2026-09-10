@@ -1179,6 +1179,11 @@ test("failed validation steers regeneration on the next tier", async () => {
   );
 
   assert.equal(steered.length, 1);
+  assert.equal(typeof (steered[0] as any)?.id, "string");
+  assert.deepEqual((steered[0] as any)?.source, {
+    kind: "plugin",
+    plugin: "dsh-model-router",
+  });
   assert.deepEqual(selection, {
     provider: "auto-tier",
     model: "auto-tier",
