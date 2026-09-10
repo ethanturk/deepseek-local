@@ -270,25 +270,6 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
     }
   }
 
-  /** Put the user in the loop when classifier or validator itself fails. */
-  function notifyUserInLoop(agentId: string, reason: string) {
-    try {
-      const agents = (ctx as any).agents;
-      const agent = agents?.get?.(agentId);
-      if (agent?.inject) {
-        agent.inject({
-          role: "user",
-          content: `[Model Router] Automatic routing paused: ${reason}. Please choose a model manually or re-send your message.`,
-        });
-      } else {
-        console.warn(`[dsh-model-router] USER IN LOOP (${agentId}): ${reason}`);
-      }
-      emitDecision(agentId, "user-in-loop", { reason });
-    } catch (err) {
-      console.warn("[dsh-model-router] notifyUserInLoop failed", err);
-    }
-  }
-
   /** Detect errors caused by unsupported / flaky reasoningEffort. */
   function isReasoningEffortError(err: unknown): boolean {
     const text = String(
@@ -423,8 +404,9 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
 
   function parseValidatorVerdict(text: unknown): ValidationResult | null {
     if (typeof text !== "string") return null;
+    const response = text.trim();
     try {
-      const parsed = JSON.parse(text.trim());
+      const parsed = JSON.parse(response);
       if (!parsed || typeof parsed !== "object") return null;
       const verdict = (parsed as any).verdict;
       if (verdict === "pass") return { passed: true };
@@ -435,7 +417,9 @@ export function apply(ctx: Context, rawConfig?: ModelRouterPluginConfig) {
         return { passed: false, reason };
       }
     } catch {
-      // The retry policy below handles malformed model output.
+      if (/^\{\s*"verdict"\s*:\s*"fail"/.test(response)) {
+        return { passed: false, reason: "Validator returned a truncated fail verdict." };
+      }
     }
     return null;
   }
@@ -496,14 +480,13 @@ ${assistantResponse.slice(0, 3000)}`;
         if (verdict) return verdict;
         console.warn(`[dsh-model-router] invalid validator reply (attempt ${attempt}/2):`, text);
       }
-      const reason = "Validator returned malformed output twice; automatic routing paused.";
-      notifyUserInLoop(agentId, reason);
-      return { passed: true, reason, routingPaused: true };
+      return {
+        passed: true,
+        reason: "Validator returned malformed output twice; validation skipped for this turn.",
+      };
     } catch (err) {
       console.warn("[dsh-model-router] validator failed", err);
-      const reason = `Validation failed: ${err}`;
-      notifyUserInLoop(agentId, reason);
-      return { passed: true, reason, routingPaused: true };
+      return { passed: true, reason: `Validation skipped: ${err}` };
     }
   }
 
@@ -678,7 +661,7 @@ ${assistantResponse.slice(0, 3000)}`;
       const messages = payload?.messages as any[] | undefined;
       if (!Array.isArray(messages) || messages.length === 0) {
         console.error(`[dsh-debug] agent/pre-step: skipping (no messages)`);
-        return next?.() ?? undefined;
+        return await next?.() ?? { kind: "enter", messages: messages ?? [] };
       }
 
       // Find the latest user message
@@ -768,7 +751,10 @@ ${assistantResponse.slice(0, 3000)}`;
     } catch (err) {
       console.warn("[dsh-model-router] pre-step classify error", err);
     }
-    return next?.() ?? undefined;
+    return await next?.() ?? {
+      kind: "enter",
+      messages: Array.isArray(payload?.messages) ? payload.messages : [],
+    };
   });
 
   // ---------- Event: select model on each request (request waterfall) ----------

@@ -1030,6 +1030,18 @@ test("virtual provider delegates retry policy resolution to DSH", () => {
   );
 });
 
+test("pre-step returns an enter decision when downstream returns undefined", async () => {
+  const handlers = createHarness({ classifierMode: "heuristic" });
+  const agent = { id: "undefined-pre-step-agent" };
+
+  const decision = await handlers.get("agent/pre-step")?.(
+    { agent, messages: [] },
+    () => undefined,
+  );
+
+  assert.deepEqual(decision, { kind: "enter", messages: [] });
+});
+
 test("validator reserves output space for reasoning before its JSON verdict", async () => {
   const validatorBudgets: number[] = [];
   const handlers = createHarness({
@@ -1056,7 +1068,39 @@ test("validator reserves output space for reasoning before its JSON verdict", as
   assert.deepEqual(validatorBudgets, [256]);
 });
 
-test("malformed validator output is retried once then pauses automatic routing", async () => {
+test("truncated fail verdict fails validation without pausing routing", async () => {
+  let validatorAttempts = 0;
+  const steered: unknown[] = [];
+  const handlers = createHarness({
+    classifierMode: "heuristic",
+    stream: async function* (options) {
+      if (modelPrompt(options)) {
+        validatorAttempts += 1;
+        yield* textStream('{"verdict":"fail","reason":"Response is incomplete and was cut off');
+      }
+    },
+  });
+  const messages = [
+    { role: "user", content: "Fix the issue", source: { kind: "user" } },
+    { role: "assistant", content: "A proposed fix." },
+  ];
+  const agent = {
+    id: "truncated-validator-agent",
+    session: { deriveMessages: () => messages },
+    steer(message: unknown) {
+      steered.push(message);
+    },
+  };
+
+  await handlers.get("agent/pre-step")?.({ agent, messages: [messages[0]] }, () => undefined);
+  await handlers.get("agent/turn-stopping")?.({ agent }, () => undefined);
+
+  assert.equal(validatorAttempts, 1);
+  assert.notEqual(handlers.modelRouter.getState(agent.id)?.routingPaused, true);
+  assert.equal(steered.length, 1);
+});
+
+test("malformed validator output is retried once without pausing automatic routing", async () => {
   let validatorAttempts = 0;
   const handlers = createHarness({
     classifierMode: "heuristic",
@@ -1081,19 +1125,17 @@ test("malformed validator output is retried once then pauses automatic routing",
   await handlers.get("agent/turn-stopping")?.({ agent }, () => undefined);
 
   assert.equal(validatorAttempts, 2);
-  assert.equal(handlers.modelRouter.getState(agent.id)?.routingPaused, true);
+  assert.notEqual(handlers.modelRouter.getState(agent.id)?.routingPaused, true);
   await handlers.get("agent/request")?.(
     { agent, signal },
     () => ({ provider: "auto-tier", model: "auto-tier" }),
   );
-  await assert.rejects(async () => {
-    for await (const _chunk of handlers.adapter.stream({
-      provider: "auto-tier",
-      model: "auto-tier",
-      messages,
-      signal,
-    })) {}
-  }, /Automatic routing paused/);
+  for await (const _chunk of handlers.adapter.stream({
+    provider: "auto-tier",
+    model: "auto-tier",
+    messages,
+    signal,
+  })) {}
 });
 
 test("failed validation steers regeneration on the next tier", async () => {
